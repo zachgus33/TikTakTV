@@ -1,0 +1,310 @@
+import { safeSourceUrl, safeUrl } from "./api";
+import { baseFromManifest, manifestUrl } from "./addon-urls";
+import { itemKey, type Item, type Addon, type Progress } from "./types";
+
+export type CollectionSource = {
+  provider?: string;
+  addonId?: string;
+  type?: string;
+  catalogId?: string;
+  genre?: string;
+  [key: string]: unknown;
+};
+export type CollectionFolder = {
+  id: string;
+  title: string;
+  sources?: CollectionSource[];
+  catalogSources?: CollectionSource[];
+  itemKeys?: string[];
+  layout?: "wide" | "poster";
+  tileShape?: "LANDSCAPE" | "POSTER" | string;
+  coverImageUrl?: string;
+  coverEmoji?: string;
+  hideTitle?: boolean;
+  heroBackdropUrl?: string;
+  heroVideoUrl?: string;
+  titleLogoUrl?: string;
+  focusGifUrl?: string;
+  [key: string]: unknown;
+};
+export type Collection = {
+  id: string;
+  title: string;
+  folders: CollectionFolder[];
+  showOnHome?: boolean;
+  backdropImageUrl?: string;
+  pinToTop?: boolean;
+  viewMode?: "FOLLOW_LAYOUT" | "TABS" | "tabs" | "rows" | string;
+  showAllTab?: boolean;
+  [key: string]: unknown;
+};
+export type Transfer = {
+  format: "nuvio-enhanced-web";
+  version: 1;
+  addons: string[];
+  collections: Collection[];
+  library: Item[];
+  progress: Progress[];
+};
+export function parseCollections(value: unknown): Collection[] {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      throw new Error("Collections must be valid JSON.");
+    }
+  }
+  if (!Array.isArray(value) || value.length > 200)
+    throw new Error(
+      "Expected a TikTakTV collections array (up to 200 collections).",
+    );
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    if (
+      !raw ||
+      typeof raw !== "object" ||
+      typeof raw.id !== "string" ||
+      !raw.id ||
+      typeof raw.title !== "string" ||
+      !raw.title.trim() ||
+      !Array.isArray(raw.folders) ||
+      raw.folders.length > 200 ||
+      seen.has(raw.id)
+    )
+      throw new Error(
+        "Each collection needs a unique ID, title, and folders array.",
+      );
+    seen.add(raw.id);
+    const folderIds = new Set<string>();
+    const folders = raw.folders.map((f: Record<string, unknown>) => {
+      if (
+        !f ||
+        typeof f.id !== "string" ||
+        typeof f.title !== "string" ||
+        folderIds.has(f.id)
+      )
+        throw new Error("Each folder needs a unique ID and a title field.");
+      folderIds.add(f.id);
+      for (const key of ["sources", "catalogSources"])
+        if (
+          f[key] !== undefined &&
+          (!Array.isArray(f[key]) ||
+            (f[key] as unknown[]).length > 100 ||
+            (f[key] as unknown[]).some((s) => !s || typeof s !== "object"))
+        )
+          throw new Error("A folder contains an invalid source list.");
+      return {
+        ...f,
+        itemKeys: Array.isArray(f.itemKeys)
+          ? f.itemKeys.filter((k): k is string => typeof k === "string")
+          : undefined,
+      } as CollectionFolder;
+    });
+    return { ...raw, folders } as Collection;
+  });
+}
+export function folderLabel(folder: CollectionFolder, index: number): string {
+  return folder.title.trim() || `Folder ${index + 1}`;
+}
+// Native collections save "none" for an unfiltered optional genre. Sending it
+// as genre=none makes add-ons such as ArabCinemeta return an empty catalog.
+export function optionalCollectionGenre(value?: string): string | undefined {
+  const genre = value?.trim();
+  return genre && genre.toLowerCase() !== "none" ? genre : undefined;
+}
+export function mergeCollections(
+  current: Collection[],
+  incoming: Collection[],
+): Collection[] {
+  const byId = new Map(current.map((c) => [c.id, c]));
+  for (const c of incoming) byId.set(c.id, c);
+  return [...byId.values()];
+}
+export function sourceAddon(
+  source: CollectionSource,
+  addons: Addon[],
+): Addon | undefined {
+  return sourceCatalog(source, addons)?.addon;
+}
+
+export function sourceCatalog(source: CollectionSource, addons: Addon[]) {
+  const active = addons.filter((addon) => addon.enabled !== false);
+  const catalogId = source.catalogId?.split(",", 1)[0];
+  if (!catalogId || !source.type) return undefined;
+  const matchesCatalog = (addon: Addon) =>
+    addon.manifest.catalogs?.find((entry) =>
+      entry.type === source.type &&
+      (entry.id === source.catalogId ||
+        entry.id === source.catalogId?.split(",", 1)[0]),
+    );
+  const declared = active.find((addon) =>
+    addon.base === source.addonId ||
+    manifestUrl(addon.base) === source.addonId ||
+    addon.manifest.id === source.addonId,
+  );
+  if (!declared && addons.some((addon) => addon.enabled === false && (
+    addon.base === source.addonId ||
+    manifestUrl(addon.base) === source.addonId ||
+    addon.manifest.id === source.addonId
+  ))) return undefined;
+  // A saved row names its provider. Another add-on can reuse the same catalog ID.
+  // A profile may still hold a former manifest ID. Recover the source only
+  // when one enabled installation advertises this exact catalog.
+  const candidates = active.filter((item) => !!matchesCatalog(item));
+  const addon = declared ?? (candidates.length === 1 ? candidates[0] : undefined);
+  const catalog = addon && matchesCatalog(addon);
+  if (addon && catalog) return { addon, catalog };
+  // Saved collection rows can outlive a catalog's presence in a dynamic manifest.
+  // Ask the original add-on for that exact catalog before treating the row as lost.
+  if (declared && catalogId && source.type)
+    return { addon: declared, catalog: { id: catalogId, type: source.type, name: String(source.title || catalogId) } };
+  // New rows keep the configured URL, so they survive a profile sync even if
+  // the add-on list has not yet been restored on the receiving device.
+  if (source.addonId && /^https:\/\//i.test(source.addonId)) {
+    try {
+      const base = baseFromManifest(manifestUrl(source.addonId));
+      if (addons.some((item) => item.enabled === false && item.base === base)) return undefined;
+      const fallback = { base, manifest: { id: source.addonId, name: source.addonId } } as Addon;
+      return { addon: fallback, catalog: { id: catalogId, type: source.type, name: String(source.title || catalogId) } };
+    } catch { return undefined; }
+  }
+  const arabicId = source.addonId === "community.elcinema.metadata";
+  const arabicCatalog = catalogId?.startsWith("elcinema-") && ["movie", "series"].includes(source.type || "");
+  const arabicDisabled = addons.some((item) => item.manifest.id === "community.elcinema.metadata" && item.enabled === false);
+  if (arabicId && arabicCatalog && !arabicDisabled) {
+    const fallback = { base: "https://arabcinemeta.osamayousry.com", manifest: { id: "community.elcinema.metadata", name: "ArabCinemeta" } } as Addon;
+    return { addon: fallback, catalog: { id: catalogId!, type: source.type!, name: String(source.title || catalogId) } };
+  }
+  return undefined;
+}
+export function addonUrls(text: string): string[] {
+  let input: unknown;
+  try {
+    input = JSON.parse(text);
+  } catch {
+    input = text
+      .split(/\r?\n/)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  const object =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : null;
+  const list = object?.addons ?? input;
+  if (!Array.isArray(list) || list.length > 100)
+    throw new Error(
+      "Paste one manifest URL per line, or an add-ons JSON array (up to 100).",
+    );
+  const urls = list.map((raw) =>
+    typeof raw === "string"
+      ? raw
+      : (raw?.manifestUrl ??
+        raw?.transportUrl ??
+        raw?.url ??
+        (raw?.base ? manifestUrl(String(raw.base)) : "")),
+  );
+  if (
+    urls.some(
+      (url) =>
+        typeof url !== "string" ||
+        !safeSourceUrl(url.replace(/^stremio:\/\//, "https://")) ||
+        !new URL(url.replace(/^stremio:\/\//, "https://")).pathname.endsWith(
+          "/manifest.json",
+        ),
+    )
+  )
+    throw new Error(
+      "Every add-on needs its HTTP, HTTPS or stremio:// manifest.json URL. Copy configured URLs from your existing add-ons.",
+    );
+  return [...new Set(urls)];
+}
+function importedItem(value: unknown): Item {
+  const x = value as Item;
+  if (
+    !x ||
+    typeof x.id !== "string" ||
+    typeof x.name !== "string" ||
+    !["movie", "series", "live"].includes(x.type) ||
+    !["addon", "xtream", "playlist"].includes(x.source)
+  )
+    throw new Error("Invalid saved title in backup.");
+  if (x.source === "addon" && !safeUrl(x.provider))
+    throw new Error("Invalid add-on source in backup.");
+  return {
+    id: x.id,
+    name: x.name,
+    type: x.type,
+    source: x.source,
+    provider: x.provider,
+    poster: safeUrl(x.poster),
+    background: safeUrl(x.background),
+    description: typeof x.description === "string" ? x.description : undefined,
+    year: x.year,
+    category: x.category,
+    extension: x.extension,
+    epgId: x.epgId,
+  };
+}
+export function parseTransfer(text: string): Transfer {
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error("Choose a valid JSON backup.");
+  }
+  if (data?.format !== "nuvio-enhanced-web" || data.version !== 1)
+    throw new Error(
+      "This is not a TikTakTV Web backup. For TikTakTV collections, use Import collections. Settings backups do not contain your add-ons or full library.",
+    );
+  const library = Array.isArray(data.library)
+    ? data.library.map(importedItem)
+    : [];
+  const progress: Progress[] = Array.isArray(data.progress)
+    ? data.progress
+        .map((p: Progress) => {
+          if (
+            !Number.isFinite(p.seconds) ||
+            !Number.isFinite(p.duration) ||
+            p.seconds < 0 ||
+            p.duration <= 0
+          )
+            throw new Error("Invalid watch progress in backup.");
+          return { ...p, item: importedItem(p.item) };
+        })
+        .slice(0, 100)
+    : [];
+  return {
+    format: "nuvio-enhanced-web",
+    version: 1,
+    addons: addonUrls(JSON.stringify(data.addons ?? [])),
+    collections: parseCollections(data.collections ?? []),
+    library,
+    progress,
+  };
+}
+export function mergeItems(current: Item[], incoming: Item[]) {
+  return [
+    ...new Map([...current, ...incoming].map((i) => [itemKey(i), i])).values(),
+  ];
+}
+export function downloadJson(name: string, value: unknown) {
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+export function downloadText(name: string, value: string) {
+  const url = URL.createObjectURL(
+    new Blob([value], { type: "application/json" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}

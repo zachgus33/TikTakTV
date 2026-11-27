@@ -1,0 +1,2036 @@
+import ConnectionPanel from "./ConnectionPanel";
+import { useEffect, useState } from "react";
+import {
+  Blocks,
+  CheckCircle2,
+  ExternalLink,
+  Globe2,
+  LibraryBig,
+  KeyRound,
+  Palette,
+  PlayCircle,
+  Plus,
+  Radio,
+  ShieldCheck,
+  Activity,
+  ArrowDown,
+  ArrowUp,
+  Download,
+  LockKeyhole,
+  Trash2,
+  UsersRound,
+  Megaphone,
+  MessageSquarePlus,
+  Sparkles,
+  Bell,
+  MonitorPlay,
+  Search,
+  SlidersHorizontal,
+} from "lucide-react";
+import {
+  connectProvider,
+  installAddon,
+  parsePlaylist,
+  safeSourceUrl,
+  safeUrl,
+} from "./api";
+import { storeProvider, save } from "./storage";
+import type { Addon, Item, Provider } from "./types";
+import { type Collection, type Transfer, addonUrls } from "./collections";
+import { installMany, mergeAddons } from "./addon-import";
+import { manifestUrl } from "./addon-urls";
+import { validateTorboxKey } from "./torbox";
+import { validateRealDebridKey } from "./realdebrid";
+import DataTools from "./DataTools";
+import {
+  friendAccessStatus,
+  publishFriendSetup,
+  redeemFriendSetup,
+  revokeFriendSetup,
+  sourceFetch,
+} from "./connection";
+import type { HomeCatalogSetting } from "./account";
+import CatalogManager from "./CatalogManager";
+import CollectionManager from "./CollectionManager";
+import HealthPanel from "./HealthPanel";
+import DownloadCenter from "./DownloadCenter";
+import PrivacyStatus from "./PrivacyStatus";
+import { validStreamRegex, type StreamPreferences } from "./stream-selection";
+import {
+  clearRequestedWhatsNewSection,
+  requestedWhatsNewSection,
+  WhatsNewPanel,
+} from "./WhatsNew";
+import FeedbackCenter from "./FeedbackCenter";
+import SponsorBlockSettings from "./SponsorBlockSettings";
+import YouTubeAutoplaySetting from "./YouTubeAutoplaySetting";
+import NextEpisodeSetting from "./NextEpisodeSetting";
+import TraktSettings from "./TraktSettings";
+import ExternalTrackingSettings from "./ExternalTrackingSettings";
+import NuvioExperienceSettings from "./NuvioExperienceSettings";
+import type { NuvioWebSettings } from "./nuvio-web-settings";
+import NuvioIntegrationsHub from "./NuvioIntegrationsHub";
+import StreamSettingsPanel from "./StreamSettingsPanel";
+
+const friendOptions = {
+  addons: "Add-ons",
+  collections: "Collections",
+  homeCatalogs: "Home catalog order",
+  settings: "Playback and app settings",
+  provider: "IPTV connection",
+  torbox: "TorBox access",
+  realDebrid: "Real-Debrid access",
+} as const;
+
+type FriendOption = keyof typeof friendOptions;
+
+export type FriendTemplate = {
+  addons: Addon[];
+  collections: Collection[];
+  autoplay: boolean;
+  homeCatalogs: HomeCatalogSetting[];
+  provider?: Provider | null;
+  // The existing encrypted vault round-trips source preferences as an opaque object.
+  sourcePreferences?: StreamPreferences & { friendSelectionV1?: FriendOption[] };
+  nuvioWebSettings?: NuvioWebSettings;
+};
+
+type Props = {
+  profileName: string;
+  trackingProfileName: string;
+  provider: Provider | null;
+  onProvider: (p: Provider | null) => void;
+  epgUrl: string;
+  onEpgUrl: (url: string) => void;
+  addons: Addon[];
+  onAddons: (a: Addon[]) => void;
+  onPlaylist: (items: Item[]) => void;
+  onStream: (url: string) => void;
+  accent: string;
+  onAccent: (value: string) => void;
+  collections: Collection[];
+  onCollections: (c: Collection[]) => void;
+  library: Item[];
+  onRestore: (t: Transfer) => Promise<string>;
+  torboxKey: string;
+  onTorboxKey: (key: string) => void;
+  realDebridKey: string;
+  onRealDebridKey: (key: string) => void;
+  autoplay: boolean;
+  onAutoplay: (value: boolean) => void;
+  sourcePreferences: StreamPreferences;
+  onSourcePreferences: (value: StreamPreferences) => void;
+  nuvioWebSettings: NuvioWebSettings;
+  onNuvioWebSettings: (value: NuvioWebSettings) => void;
+  playbackConnected: boolean;
+  tmdbKey: string;
+  onTmdbKey: (key: string) => void;
+  friendTemplate: FriendTemplate;
+  onFriendTemplate: (
+    template: FriendTemplate,
+    torboxKey: string,
+    realDebridKey: string,
+  ) => Promise<void>;
+  homeCatalogs: HomeCatalogSetting[];
+  onHomeCatalogs: (value: HomeCatalogSetting[]) => void;
+};
+type SettingsSection =
+  | "addons"
+  | "collections"
+  | "live"
+  | "enhanced"
+  | "appearance"
+  | "home"
+  | "details"
+  | "library-display"
+  | "player"
+  | "streams"
+  | "notifications"
+  | "integrations"
+  | "playback"
+  | "health"
+  | "downloads"
+  | "privacy"
+  | "trakt"
+  | "simkl"
+  | "anilist"
+  | "feedback"
+  | "whatsnew"
+  | "general";
+
+const sections = [
+  {
+    id: "enhanced",
+    label: "TikTakTV Enhanced",
+    description: "Home, streams and TikTak features",
+    icon: Sparkles,
+    group: "Enhanced",
+  },
+  {
+    id: "addons",
+    label: "Add-ons",
+    description: "Catalogs and sources",
+    icon: Blocks,
+    group: "Enhanced",
+  },
+  {
+    id: "collections",
+    label: "Collections",
+    description: "Home and metadata",
+    icon: LibraryBig,
+    group: "Enhanced",
+  },
+  {
+    id: "live",
+    label: "Live TV",
+    description: "IPTV and playlists",
+    icon: Radio,
+    group: "Enhanced",
+  },
+  {
+    id: "appearance",
+    label: "Appearance",
+    description: "Hero, posters and navigation",
+    icon: Palette,
+    group: "General",
+  },
+  {
+    id: "home",
+    label: "Home screen",
+    description: "Hero and catalog presentation",
+    icon: Sparkles,
+    group: "General",
+  },
+  {
+    id: "details",
+    label: "Metadata screen",
+    description: "Sections, episodes and trailers",
+    icon: PlayCircle,
+    group: "General",
+  },
+  {
+    id: "library-display",
+    label: "Library display",
+    description: "Layout, filtering and sorting",
+    icon: LibraryBig,
+    group: "General",
+  },
+  {
+    id: "player",
+    label: "Player",
+    description: "Controls, tracks and subtitles",
+    icon: MonitorPlay,
+    group: "General",
+  },
+  {
+    id: "streams",
+    label: "Streams",
+    description: "Selection, regex and source reuse",
+    icon: SlidersHorizontal,
+    group: "General",
+  },
+  {
+    id: "playback",
+    label: "Playback",
+    description: "Player and debrid",
+    icon: PlayCircle,
+    group: "General",
+  },
+  {
+    id: "general",
+    label: "General",
+    description: "Appearance and data",
+    icon: Palette,
+    group: "Advanced",
+  },
+  {
+    id: "notifications",
+    label: "Notifications",
+    description: "Episode release reminders",
+    icon: Bell,
+    group: "General",
+  },
+  {
+    id: "health",
+    label: "Health check",
+    description: "Connections and codecs",
+    icon: Activity,
+    group: "Advanced",
+  },
+  {
+    id: "downloads",
+    label: "Downloads",
+    description: "Activity and history",
+    icon: Download,
+    group: "General",
+  },
+  {
+    id: "feedback",
+    label: "Feedback",
+    description: "Reports and requests",
+    icon: MessageSquarePlus,
+    group: "About",
+  },
+  {
+    id: "whatsnew",
+    label: "What's new",
+    description: "Recent updates",
+    icon: Megaphone,
+    group: "About",
+  },
+  {
+    id: "trakt",
+    label: "Trakt",
+    description: "Your own watchlist",
+    icon: Activity,
+    group: "Integrations",
+  },
+  {
+    id: "integrations",
+    label: "Integrations",
+    description: "Services and native mappings",
+    icon: Globe2,
+    group: "Integrations",
+  },
+  {
+    id: "simkl",
+    label: "Simkl",
+    description: "Movie and show tracking",
+    icon: Activity,
+    group: "Integrations",
+  },
+  {
+    id: "anilist",
+    label: "AniList",
+    description: "Anime list tracking",
+    icon: Activity,
+    group: "Integrations",
+  },
+  {
+    id: "privacy",
+    label: "Privacy & status",
+    description: "Data and services",
+    icon: LockKeyhole,
+    group: "Advanced",
+  },
+] as const;
+
+function requestedSettingsSection(): SettingsSection | null {
+  if (sessionStorage.getItem("tiktak:open-settings-section") === "downloads")
+    return "downloads";
+  if (localStorage.getItem("tiktak:trakt-callback")) return "trakt";
+  if (localStorage.getItem("tiktak:simkl-callback")) return "simkl";
+  if (localStorage.getItem("tiktak:anilist-callback")) return "anilist";
+  if (requestedWhatsNewSection()) return "whatsnew";
+  return null;
+}
+
+export default function Settings(props: Props) {
+  const [section, setSection] = useState<SettingsSection>(
+    () => requestedSettingsSection() ?? "enhanced",
+  );
+  const [busy, setBusy] = useState("");
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(
+    () => requestedSettingsSection() !== null,
+  );
+  const [pendingAddonRemoval, setPendingAddonRemoval] = useState<string | null>(
+    null,
+  );
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [settingsQuery, setSettingsQuery] = useState("");
+  const [remember, setRemember] = useState(false);
+  const [epgDraft, setEpgDraft] = useState(props.epgUrl);
+  const [sourcePreferences, setSourcePreferences] = useState(
+    props.sourcePreferences,
+  );
+  const [friendSelection, setFriendSelection] = useState<FriendOption[]>([]);
+  const [friendAddonBases, setFriendAddonBases] = useState<string[]>([]);
+  const [friendCollectionIds, setFriendCollectionIds] = useState<string[]>([]);
+  const [friendStatus, setFriendStatus] = useState<{
+    available: boolean;
+    owner: boolean;
+    published: boolean;
+  } | null>(null);
+  useEffect(() => clearRequestedWhatsNewSection(), []);
+  useEffect(
+    () => sessionStorage.removeItem("tiktak:open-settings-section"),
+    [],
+  );
+  useEffect(() => setEpgDraft(props.epgUrl), [props.epgUrl]);
+  useEffect(
+    () => setSourcePreferences(props.sourcePreferences),
+    [props.sourcePreferences],
+  );
+  useEffect(() => {
+    if (!props.playbackConnected) {
+      setFriendStatus(null);
+      return;
+    }
+    void friendAccessStatus()
+      .then(setFriendStatus)
+      .catch(() => setFriendStatus(null));
+  }, [props.playbackConnected]);
+  async function run(name: string, fn: () => Promise<void>) {
+    setBusy(name);
+    setError("");
+    setSuccess("");
+    try {
+      await fn();
+    } catch (e) {
+      setError(
+        e instanceof Error ? e.message : "Something went wrong. Try again.",
+      );
+    } finally {
+      setBusy("");
+    }
+  }
+  function restoreFriendOwnerCredentials(result: {
+    torboxKey?: string;
+    realDebridKey?: string;
+    ownerTorboxKey?: string;
+    ownerRealDebridKey?: string;
+  }) {
+    const torboxKey = result.ownerTorboxKey ?? result.torboxKey ?? "";
+    const realDebridKey =
+      result.ownerRealDebridKey ?? result.realDebridKey ?? "";
+    if (torboxKey || props.torboxKey.startsWith("friend:")) {
+      save("torbox-key", torboxKey);
+      sessionStorage.removeItem("nuvio:torbox-key");
+      props.onTorboxKey(torboxKey);
+    }
+    if (realDebridKey || props.realDebridKey.startsWith("friend-rd:")) {
+      save("realdebrid-key", realDebridKey);
+      sessionStorage.removeItem("nuvio:realdebrid-key");
+      props.onRealDebridKey(realDebridKey);
+    }
+  }
+  async function revokePublishedFriendCode(remake: boolean) {
+    const result = await revokeFriendSetup();
+    restoreFriendOwnerCredentials(result);
+    setFriendStatus((current) =>
+      current
+        ? { ...current, owner: false, published: false }
+        : { available: false, owner: false, published: false },
+    );
+    setSuccess(
+      remake
+        ? "Friend code reset. Enter the same code or a new one below to publish the current setup as a fresh revision."
+        : "Your friend code was revoked. Existing shared access has expired.",
+    );
+  }
+  return (
+    <div className="settings-page">
+      <div className="section-title">
+        <div>
+          <span className="eyebrow">MAKE IT YOURS</span>
+          <h1>Settings</h1>
+          <p>Manage content sources, playback, and preferences.</p>
+        </div>
+        <ShieldCheck className="section-icon" />
+      </div>
+      <section className="settings-owner-strip" aria-label="Active setup owner">
+        <ShieldCheck size={19} />
+        <div>
+          <strong>{props.profileName || "Current profile"}</strong>
+          <span>
+            This profile owns {props.addons.length} add-ons,{" "}
+            {props.collections.length} collections,{" "}
+            {props.torboxKey
+              ? "a TorBox connection"
+              : props.realDebridKey
+                ? "a Real-Debrid connection"
+                : "no direct debrid key"}
+            , and{" "}
+            {props.provider
+              ? "its own Live TV connection"
+              : "no Live TV connection"}
+            .
+          </span>
+        </div>
+      </section>
+      {error && (
+        <div className="error" role="alert">
+          {error}
+        </div>
+      )}
+      {success && (
+        <div className="success" role="status">
+          <CheckCircle2 size={20} />
+          {success}
+        </div>
+      )}
+      <div
+        className={`settings-shell${mobilePanelOpen ? " mobile-panel-open" : ""}`}
+      >
+        <nav className="settings-nav" aria-label="Settings sections">
+          <label className="settings-search">
+            <Search size={17} />
+            <input
+              type="search"
+              value={settingsQuery}
+              placeholder="Search settings"
+              aria-label="Search settings"
+              onChange={(event) => setSettingsQuery(event.target.value)}
+            />
+          </label>
+          {["Enhanced", "General", "Integrations", "Advanced", "About"].map(
+            (group) => {
+              const matches = sections.filter(
+                (item) =>
+                  item.group === group &&
+                  `${item.label} ${item.description}`
+                    .toLowerCase()
+                    .includes(settingsQuery.trim().toLowerCase()),
+              );
+              if (!matches.length) return null;
+              return (
+                <div className="settings-nav-group" key={group}>
+                  <span>{group}</span>
+                  {matches.map((item) => (
+                    <button
+                      key={item.id}
+                      className={section === item.id ? "active" : ""}
+                      aria-current={section === item.id ? "page" : undefined}
+                      onClick={() => {
+                        setSection(item.id);
+                        setMobilePanelOpen(true);
+                      }}
+                    >
+                      <item.icon size={19} />
+                      <span>
+                        <strong>{item.label}</strong>
+                        <small>{item.description}</small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              );
+            },
+          )}
+        </nav>
+        <div className="settings-panels">
+          <button
+            type="button"
+            className="settings-mobile-back"
+            onClick={() => setMobilePanelOpen(false)}
+          >
+            Back to settings
+          </button>
+          <header className="settings-panel-heading">
+            <span>{sections.find((item) => item.id === section)?.label}</span>
+            <h2>{sections.find((item) => item.id === section)?.description}</h2>
+          </header>
+          {section === "enhanced" && (
+            <NuvioExperienceSettings
+              page="enhanced"
+              value={props.nuvioWebSettings}
+              onChange={props.onNuvioWebSettings}
+            />
+          )}
+          {section === "appearance" && (
+            <NuvioExperienceSettings
+              page="appearance"
+              value={props.nuvioWebSettings}
+              onChange={props.onNuvioWebSettings}
+            />
+          )}
+          {section === "home" && (
+            <NuvioExperienceSettings
+              page="home"
+              value={props.nuvioWebSettings}
+              onChange={props.onNuvioWebSettings}
+            />
+          )}
+          {section === "details" && (
+            <NuvioExperienceSettings
+              page="details"
+              value={props.nuvioWebSettings}
+              onChange={props.onNuvioWebSettings}
+            />
+          )}
+          {section === "library-display" && (
+            <NuvioExperienceSettings
+              page="library"
+              value={props.nuvioWebSettings}
+              onChange={props.onNuvioWebSettings}
+            />
+          )}
+          {section === "player" && (
+            <NuvioExperienceSettings
+              page="player"
+              value={props.nuvioWebSettings}
+              onChange={props.onNuvioWebSettings}
+            />
+          )}
+          {section === "streams" && (
+            <StreamSettingsPanel
+              addons={props.addons}
+              value={sourcePreferences}
+              onSave={(preferences) => {
+                setSourcePreferences(preferences);
+                props.onSourcePreferences(preferences);
+                props.onAutoplay(preferences.autoPlayMode !== "manual");
+              }}
+            />
+          )}
+          {section === "notifications" && (
+            <NuvioExperienceSettings
+              page="notifications"
+              value={props.nuvioWebSettings}
+              onChange={props.onNuvioWebSettings}
+            />
+          )}
+          {section === "integrations" && (
+            <NuvioIntegrationsHub onNavigate={setSection} />
+          )}
+          <div hidden={section !== "playback"}>
+            <ConnectionPanel restored={props.playbackConnected} />
+            <section className="settings-card">
+              <div className="card-heading">
+                <ShieldCheck />
+                <div>
+                  <h2>YouTube playback</h2>
+                  <p>Manage continuous play and SponsorBlock behavior.</p>
+                </div>
+              </div>
+              <YouTubeAutoplaySetting />
+              <SponsorBlockSettings open />
+              <p className="hint">
+                These choices apply immediately to the YouTube player on this
+                browser or TV. SponsorBlock data is community supplied, so a
+                segment may not exist for every video.
+              </p>
+            </section>
+            <section className="settings-card">
+              <div className="card-heading">
+                <PlayCircle />
+                <div>
+                  <h2>Series playback</h2>
+                  <p>Choose whether episodes continue automatically.</p>
+                </div>
+              </div>
+              <NextEpisodeSetting />
+            </section>
+            <section className="settings-card">
+              <div className="card-heading">
+                <UsersRound />
+                <div>
+                  <h2>Friend setup</h2>
+                  <p>Share a complete streaming setup with people you trust.</p>
+                </div>
+                {friendStatus?.published && (
+                  <span className="badge connected">Your code is active</span>
+                )}
+              </div>
+              <p>
+                Enter a private code to copy the parts of the setup its owner chose to share.
+              </p>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  const code = String(new FormData(form).get("friendCode"));
+                  void run("friend-redeem", async () => {
+                    const result = await redeemFriendSetup<FriendTemplate>(
+                      code.trim(),
+                    );
+                    await props.onFriendTemplate(
+                      result.template,
+                      result.torboxKey ?? "",
+                      result.realDebridKey ?? "",
+                    );
+                    form.reset();
+                    setSuccess(
+                      "Friend setup installed and saved to this TikTakTV profile. You can play a title now.",
+                    );
+                  });
+                }}
+              >
+                <label className="grow">
+                  Friend code
+                  <input
+                    name="friendCode"
+                    inputMode="numeric"
+                    pattern="[0-9]{6,12}"
+                    autoComplete="one-time-code"
+                    placeholder="6–12 digit code"
+                    required
+                  />
+                </label>
+                <button disabled={!!busy || !props.playbackConnected}>
+                  <KeyRound size={18} />
+                  {busy === "friend-redeem" ? "Installing?" : "Install setup"}
+                </button>
+              </form>
+              {!props.playbackConnected && (
+                <p className="hint">
+                  Connect the TikTak TV playback service above before entering a
+                  friend code.
+                </p>
+              )}
+              <details open={!friendStatus?.published}>
+                <summary>
+                  {friendStatus?.published
+                    ? "Manage your friend code"
+                    : "Create your own friend code"}
+                </summary>
+                <p className="hint">
+                  Select what to share. Installing a code adds the selected add-ons and collections and applies any included settings.
+                  Sharing add-ons can expose tokens in their manifest URLs. Sharing an IPTV connection includes its credentials.
+                  A new code replaces your previous code.
+                </p>
+                <fieldset>
+                  <legend>Include in your code</legend>
+                  {(Object.keys(friendOptions) as FriendOption[]).map((option) => {
+                    const disabled =
+                      (option === "provider" && !props.friendTemplate.provider) ||
+                      (option === "torbox" && (!props.torboxKey || props.torboxKey.startsWith("friend:"))) ||
+                      (option === "realDebrid" && (!props.realDebridKey || props.realDebridKey.startsWith("friend-rd:")));
+                    return (
+                      <div key={option}>
+                        <label>
+                          <input type="checkbox" checked={!disabled && friendSelection.includes(option)} disabled={disabled}
+                            onChange={(event) => {
+                              const checked = event.currentTarget.checked;
+                              setFriendSelection((current) => checked ? [...current, option] : current.filter((item) => item !== option));
+                            }} />
+                          {friendOptions[option]}
+                        </label>
+                        {option === "addons" && friendSelection.includes(option) && (
+                          <fieldset>
+                            <legend>Choose add-ons</legend>
+                            {props.friendTemplate.addons.map((addon) => (
+                              <label key={addon.base}>
+                                <input type="checkbox" checked={friendAddonBases.includes(addon.base)}
+                                  onChange={(event) => {
+                                    const checked = event.currentTarget.checked;
+                                    setFriendAddonBases((current) => checked ? [...current, addon.base] : current.filter((base) => base !== addon.base));
+                                  }} />
+                                {addon.manifest.name}
+                              </label>
+                            ))}
+                          </fieldset>
+                        )}
+                        {option === "collections" && friendSelection.includes(option) && (
+                          <fieldset>
+                            <legend>Choose collections</legend>
+                            {props.friendTemplate.collections.map((collection) => (
+                              <label key={collection.id}>
+                                <input type="checkbox" checked={friendCollectionIds.includes(collection.id)}
+                                  onChange={(event) => {
+                                    const checked = event.currentTarget.checked;
+                                    setFriendCollectionIds((current) => checked ? [...current, collection.id] : current.filter((id) => id !== collection.id));
+                                  }} />
+                                {collection.title}
+                              </label>
+                            ))}
+                          </fieldset>
+                        )}
+                      </div>
+                    );
+                  })}
+                </fieldset>
+                <form
+                  className="inline-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const form = event.currentTarget;
+                    const code = String(
+                      new FormData(form).get("ownerFriendCode"),
+                    ).trim();
+                    void run("friend-publish", async () => {
+                      const original = props.friendTemplate;
+                      const addons = original.addons.filter((addon) => friendAddonBases.includes(addon.base));
+                      const collections = original.collections.filter((collection) => friendCollectionIds.includes(collection.id));
+                      const selected = friendSelection.filter((option) => {
+                        if (option === "provider") return !!original.provider;
+                        if (option === "torbox") return !!props.torboxKey && !props.torboxKey.startsWith("friend:");
+                        if (option === "realDebrid") return !!props.realDebridKey && !props.realDebridKey.startsWith("friend-rd:");
+                        if (option === "addons") return addons.length > 0;
+                        if (option === "collections") return collections.length > 0;
+                        return true;
+                      });
+                      if (!selected.length) throw new Error("Choose at least one item to share.");
+                      const settings = selected.includes("settings");
+                      await publishFriendSetup(
+                        code,
+                        selected.includes("torbox") ? props.torboxKey : "",
+                        selected.includes("realDebrid") ? props.realDebridKey : "",
+                        {
+                          addons: selected.includes("addons") ? addons : [],
+                          collections: selected.includes("collections") ? collections : [],
+                          homeCatalogs: selected.includes("homeCatalogs") ? original.homeCatalogs : [],
+                          autoplay: settings && original.autoplay,
+                          sourcePreferences: {
+                            ...(settings ? original.sourcePreferences : {}),
+                            friendSelectionV1: selected,
+                          },
+                          nuvioWebSettings: settings ? original.nuvioWebSettings : undefined,
+                          provider: selected.includes("provider") ? original.provider : undefined,
+                        },
+                      );
+                      setFriendStatus({
+                        available: true,
+                        owner: true,
+                        published: true,
+                      });
+                      form.reset();
+                      setSuccess(
+                        "Your encrypted friend code is active. Share the code only with people you trust.",
+                      );
+                    });
+                  }}
+                >
+                  <label className="grow">
+                    Your private share code
+                    <input
+                      name="ownerFriendCode"
+                      type="password"
+                      inputMode="numeric"
+                      pattern="[0-9]{6,12}"
+                      autoComplete="new-password"
+                      placeholder="Choose 6–12 digits"
+                      required
+                    />
+                  </label>
+                  <button
+                    disabled={
+                      !!busy ||
+                      !props.playbackConnected ||
+                      friendSelection.length === 0
+                    }
+                  >
+                    {busy === "friend-publish"
+                      ? "Encrypting?"
+                      : friendStatus?.published
+                        ? "Replace code"
+                        : "Create code"}
+                  </button>
+                </form>
+                {friendStatus?.published && (
+                  <div className="friend-code-actions">
+                    <button
+                      disabled={!!busy}
+                      onClick={() =>
+                        void run("friend-reset", () =>
+                          revokePublishedFriendCode(true),
+                        )
+                      }
+                    >
+                      <KeyRound size={17} />
+                      {busy === "friend-reset"
+                        ? "Resetting…"
+                        : "Reset and remake code"}
+                    </button>
+                    <button
+                      className="danger-button"
+                      disabled={!!busy}
+                      onClick={() =>
+                        void run("friend-revoke", () =>
+                          revokePublishedFriendCode(false),
+                        )
+                      }
+                    >
+                      <Trash2 size={17} />
+                      Revoke my code
+                    </button>
+                  </div>
+                )}
+              </details>
+            </section>
+            <section className="settings-card">
+              <h2>Debrid playback</h2>
+              <p>
+                Install any compatible Stremio streaming add-on below. Connect
+                your own TorBox or Real-Debrid key here so cached torrent
+                results can be resolved securely for browser playback.
+              </p>
+              {props.torboxKey && (
+                <div className="connection">
+                  <strong>TorBox connected</strong>
+                  <button
+                    onClick={() => {
+                      localStorage.removeItem("nuvio:torbox-key");
+                      sessionStorage.removeItem("nuvio:torbox-key");
+                      props.onTorboxKey("");
+                    }}
+                  >
+                    Disconnect TorBox
+                  </button>
+                </div>
+              )}
+              <form
+                className="inline-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.currentTarget;
+                  const values = new FormData(form);
+                  const key = String(values.get("torbox")).trim();
+                  void run("torbox", async () => {
+                    await validateTorboxKey(key);
+                    localStorage.removeItem("nuvio:torbox-key");
+                    sessionStorage.removeItem("nuvio:torbox-key");
+                    if (
+                      !save(
+                        "torbox-key",
+                        key,
+                        values.get("rememberTorbox")
+                          ? localStorage
+                          : sessionStorage,
+                      )
+                    )
+                      throw new Error(
+                        "Could not save the connection in this browser.",
+                      );
+                    props.onTorboxKey(key);
+                    form.reset();
+                    setSuccess(
+                      "TorBox connected. Cached torrent results can now play.",
+                    );
+                  });
+                }}
+              >
+                <label className="grow">
+                  TorBox API key
+                  <input
+                    name="torbox"
+                    type="password"
+                    autoComplete="off"
+                    required
+                    placeholder="From your TorBox account settings"
+                  />
+                </label>
+                <label className="check">
+                  <input name="rememberTorbox" type="checkbox" />
+                  Remember key on this device
+                </label>
+                <button disabled={!!busy}>
+                  {busy === "torbox" ? "Connecting…" : "Connect TorBox"}
+                </button>
+              </form>
+              <p className="hint">
+                The key reaches TorBox directly or through your private playback
+                service. TikTakTV account sync can save it with your setup. Playing
+                a torrent can add its cached entry to your TorBox account. No
+                uncached download is started.
+              </p>
+              {false && <details className="source-preferences">
+                <summary>Advanced source controls</summary>
+                <div className="form-grid">
+                  <label>
+                    Automatic source selection
+                    <select
+                      value={sourcePreferences.autoPlayMode}
+                      onChange={(event) => {
+                        const mode =
+                          event.target.value === "manual" ||
+                          event.target.value === "regex"
+                            ? event.target.value
+                            : "first";
+                        setSourcePreferences((current) => ({
+                          ...current,
+                          autoPlayMode: mode,
+                        }));
+                        props.onAutoplay(mode !== "manual");
+                      }}
+                    >
+                      <option value="manual">Choose a stream manually</option>
+                      <option value="first">First matching stream</option>
+                      <option value="regex">Custom regex match</option>
+                    </select>
+                  </label>
+                  <label>
+                    Selection delay
+                    <select
+                      value={sourcePreferences.autoPlayTimeoutSeconds}
+                      onChange={(event) =>
+                        setSourcePreferences((current) => ({
+                          ...current,
+                          autoPlayTimeoutSeconds: Number(event.target.value),
+                        }))
+                      }
+                    >
+                      <option value="0">Instant</option>
+                      <option value="1">1 second</option>
+                      <option value="2">2 seconds</option>
+                      <option value="3">3 seconds</option>
+                      <option value="5">5 seconds</option>
+                      <option value="10">10 seconds</option>
+                      <option value="15">15 seconds</option>
+                      <option value="30">30 seconds</option>
+                    </select>
+                  </label>
+                  <label>
+                    Source scope
+                    <select
+                      value={sourcePreferences.autoPlaySource}
+                      onChange={(event) =>
+                        setSourcePreferences((current) => ({
+                          ...current,
+                          autoPlaySource:
+                            event.target.value === "addons"
+                              ? "addons"
+                              : "all",
+                        }))
+                      }
+                    >
+                      <option value="all">All sources</option>
+                      <option value="addons">Installed add-ons</option>
+                    </select>
+                  </label>
+                  {sourcePreferences.autoPlayMode === "regex" && (
+                    <label className="grow">
+                      Custom stream regex
+                      <input
+                        value={sourcePreferences.autoPlayRegex}
+                        placeholder="(?=.*Debridio)(?=.*1440p)"
+                        onChange={(event) =>
+                          setSourcePreferences((current) => ({
+                            ...current,
+                            autoPlayRegex: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                  )}
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={sourcePreferences.reuseLastLink}
+                      onChange={(event) =>
+                        setSourcePreferences((current) => ({
+                          ...current,
+                          reuseLastLink: event.target.checked,
+                        }))
+                      }
+                    />
+                    Reuse the last working link
+                  </label>
+                  {sourcePreferences.reuseLastLink && (
+                    <label>
+                      Reuse link for
+                      <select
+                        value={sourcePreferences.reuseLastLinkHours}
+                        onChange={(event) =>
+                          setSourcePreferences((current) => ({
+                            ...current,
+                            reuseLastLinkHours: Number(event.target.value),
+                          }))
+                        }
+                      >
+                        <option value="1">1 hour</option>
+                        <option value="6">6 hours</option>
+                        <option value="12">12 hours</option>
+                        <option value="24">24 hours</option>
+                        <option value="72">3 days</option>
+                        <option value="168">7 days</option>
+                      </select>
+                    </label>
+                  )}
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={sourcePreferences.preferBingeGroup}
+                      onChange={(event) =>
+                        setSourcePreferences((current) => ({
+                          ...current,
+                          preferBingeGroup: event.target.checked,
+                        }))
+                      }
+                    />
+                    Prefer the current series release group
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={sourcePreferences.reuseBingeGroup}
+                      onChange={(event) =>
+                        setSourcePreferences((current) => ({
+                          ...current,
+                          reuseBingeGroup: event.target.checked,
+                        }))
+                      }
+                    />
+                    Reuse that group for the next episode
+                  </label>
+                </div>
+                <fieldset className="source-addon-scope">
+                  <legend>Automatic selection add-ons</legend>
+                  <p className="hint">
+                    Leave every add-on unchecked to use all installed add-ons.
+                  </p>
+                  {props.addons
+                    .filter((addon) => addon.enabled !== false)
+                    .filter((addon) =>
+                      addon.manifest.resources?.some((resource) =>
+                        typeof resource === "string"
+                          ? resource === "stream"
+                          : resource.name === "stream",
+                      ),
+                    )
+                    .map((addon) => (
+                      <label className="check" key={addon.base}>
+                        <input
+                          type="checkbox"
+                          checked={sourcePreferences.autoPlaySelectedAddons.includes(
+                            addon.base,
+                          )}
+                          onChange={(event) =>
+                            setSourcePreferences((current) => ({
+                              ...current,
+                              autoPlaySelectedAddons: event.target.checked
+                                ? [...current.autoPlaySelectedAddons, addon.base]
+                                : current.autoPlaySelectedAddons.filter(
+                                    (id) => id !== addon.base,
+                                  ),
+                            }))
+                          }
+                        />
+                        {addon.manifest.name}
+                      </label>
+                    ))}
+                </fieldset>
+                {sourcePreferences.autoPlayMode === "regex" && (
+                  <div
+                    className="source-regex-presets"
+                    aria-label="Regex presets"
+                  >
+                    {[
+                      ["1440p or better", "(1440p|2160p|4k)"],
+                      ["Debridio 1440p", "(?=.*Debridio)(?=.*1440p)"],
+                      ["1080p or better", "(1080p|1440p|2160p|4k)"],
+                      ["Web sources", "(web[-\\s]?dl|webrip)"],
+                      ["Blu-ray / remux", "(bluray|b[dr]rip|remux)"],
+                      ["HEVC / x265", "(hevc|x265|h\\.265)"],
+                      [
+                        "No CAM / telesync",
+                        "^(?!.*\\b(cam|hdcam|ts|telesync)\\b).*$",
+                      ],
+                    ].map(([label, pattern]) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() =>
+                          setSourcePreferences((current) => ({
+                            ...current,
+                            autoPlayRegex: pattern,
+                          }))
+                        }
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      sourcePreferences.autoPlayMode === "regex" &&
+                      !validStreamRegex(sourcePreferences.autoPlayRegex)
+                    ) {
+                      setSuccess("");
+                      setError(
+                        "Enter a valid stream regex containing at least one word or number.",
+                      );
+                      return;
+                    }
+                    setError("");
+                    props.onSourcePreferences({
+                      ...sourcePreferences,
+                      updatedAt: Date.now(),
+                    });
+                    props.onAutoplay(
+                      sourcePreferences.autoPlayMode !== "manual",
+                    );
+                    setSuccess(
+                      "Source preferences saved. TikTakTV will sync them to this profile on your other devices.",
+                    );
+                  }}
+                >
+                  Save source controls
+                </button>
+                <p className="hint">
+                  This follows TikTakTV mobile selection: add-ons run in their
+                  installed order, direct debrid results are grouped first,
+                  and regex only controls eligibility. Manual source lists keep
+                  every playable result.
+                </p>
+              </details>}
+              {props.realDebridKey && (
+                <div className="connection">
+                  <strong>Real-Debrid connected</strong>
+                  <button
+                    onClick={() => {
+                      localStorage.removeItem("nuvio:realdebrid-key");
+                      sessionStorage.removeItem("nuvio:realdebrid-key");
+                      props.onRealDebridKey("");
+                    }}
+                  >
+                    Disconnect Real-Debrid
+                  </button>
+                </div>
+              )}
+              <form
+                className="inline-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.currentTarget;
+                  const values = new FormData(form);
+                  const key = String(values.get("realdebrid")).trim();
+                  void run("realdebrid", async () => {
+                    await validateRealDebridKey(key);
+                    localStorage.removeItem("nuvio:realdebrid-key");
+                    sessionStorage.removeItem("nuvio:realdebrid-key");
+                    if (
+                      !save(
+                        "realdebrid-key",
+                        key,
+                        values.get("rememberRealDebrid")
+                          ? localStorage
+                          : sessionStorage,
+                      )
+                    )
+                      throw new Error(
+                        "Could not save the connection in this browser.",
+                      );
+                    props.onRealDebridKey(key);
+                    form.reset();
+                    setSuccess(
+                      "Real-Debrid connected. Cached torrent results can now play.",
+                    );
+                  });
+                }}
+              >
+                <label className="grow">
+                  Real-Debrid API key
+                  <input
+                    name="realdebrid"
+                    type="password"
+                    autoComplete="off"
+                    required
+                    placeholder="From your Real-Debrid account settings"
+                  />
+                </label>
+                <label className="check">
+                  <input name="rememberRealDebrid" type="checkbox" />
+                  Remember key on this device
+                </label>
+                <button disabled={!!busy}>
+                  {busy === "realdebrid"
+                    ? "Connecting…"
+                    : "Connect Real-Debrid"}
+                </button>
+              </form>
+              <p className="hint">
+                TikTak TV only requests cached torrent files and secure download
+                links. Your key belongs to your TikTakTV setup and is never shared
+                with unrelated site visitors.
+              </p>
+            </section>
+          </div>
+          {section === "health" && (
+            <HealthPanel
+              addons={props.addons}
+              torboxKey={props.torboxKey}
+              realDebridKey={props.realDebridKey}
+              provider={props.provider}
+            />
+          )}
+          {section === "downloads" && <DownloadCenter />}
+          {section === "trakt" && (
+            <TraktSettings profileName={props.trackingProfileName} />
+          )}
+          {section === "simkl" && (
+            <ExternalTrackingSettings
+              provider="simkl"
+              profileName={props.trackingProfileName}
+            />
+          )}
+          {section === "anilist" && (
+            <ExternalTrackingSettings
+              provider="anilist"
+              profileName={props.trackingProfileName}
+            />
+          )}
+          {section === "privacy" && (
+            <PrivacyStatus onOpenFeedback={() => setSection("feedback")} />
+          )}
+          {section === "feedback" && <FeedbackCenter />}
+          {section === "whatsnew" && (
+            <WhatsNewPanel onOpenFeedback={() => setSection("feedback")} />
+          )}
+          <div hidden={section !== "live"}>
+            <section className="settings-card">
+              <div className="card-heading">
+                <Radio />
+                <div>
+                  <h2>Xtream IPTV</h2>
+                  <p>Connect live channels, movies, and series.</p>
+                </div>
+                {props.provider && (
+                  <span className="badge connected">Connected</span>
+                )}
+              </div>
+              {props.provider && (
+                <div className="connection">
+                  <div>
+                    <strong>{props.provider.name || "My IPTV"}</strong>
+                    <p>{new URL(props.provider.server).hostname}</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      storeProvider(null, false);
+                      props.onProvider(null);
+                      setSuccess(
+                        "Provider disconnected. Saved titles remain in your library.",
+                      );
+                    }}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.currentTarget;
+                  const f = new FormData(form);
+                  void run("provider", async () => {
+                    const p = await connectProvider({
+                      name: String(f.get("name") || "My IPTV").trim(),
+                      server: String(f.get("server")),
+                      username: String(f.get("username")).trim(),
+                      password: String(f.get("password")),
+                    });
+                    storeProvider(p, remember);
+                    props.onProvider(p);
+                    setSuccess(
+                      "Connection verified. Your IPTV library is ready.",
+                    );
+                    form.reset();
+                    setRemember(false);
+                  });
+                }}
+              >
+                <div className="form-grid">
+                  <label>
+                    Connection name
+                    <input name="name" placeholder="My IPTV" maxLength={60} />
+                  </label>
+                  <label>
+                    Server address
+                    <input
+                      name="server"
+                      type="url"
+                      placeholder="http://your-provider.com:8080"
+                      required
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label>
+                    Username
+                    <input
+                      name="username"
+                      autoComplete="username"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Password
+                    <input
+                      name="password"
+                      type="password"
+                      autoComplete="current-password"
+                      required
+                    />
+                  </label>
+                </div>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={remember}
+                    onChange={(e) => setRemember(e.target.checked)}
+                  />{" "}
+                  Remember this connection on this device
+                </label>
+                <p className="hint">
+                  {remember
+                    ? "Credentials will be stored in this browser, unencrypted. Use only on your own device."
+                    : "By default, credentials are kept only for this browser tab’s session."}
+                </p>
+                <button className="primary" disabled={!!busy}>
+                  {busy === "provider"
+                    ? "Testing connection…"
+                    : "Test & connect"}
+                </button>
+              </form>
+              <details>
+                <summary>Will HTTP IPTV work in a browser?</summary>
+                <p>
+                  Yes. Signed-in users send HTTP provider API and media requests
+                  through TikTak TV’s HTTPS companion. H.264 video with AAC
+                  audio has broad compatibility, and the companion converts
+                  sources that the browser cannot play directly.
+                </p>
+              </details>
+            </section>
+            <section className="settings-card">
+              <div className="card-heading">
+                <Radio />
+                <div>
+                  <h2>Program guide</h2>
+                  <p>
+                    Add an optional XMLTV/EPG URL for Xtream or M3U channels.
+                  </p>
+                </div>
+                {props.epgUrl && (
+                  <span className="badge connected">Custom guide</span>
+                )}
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const value = epgDraft.trim();
+                  if (!value) {
+                    props.onEpgUrl("");
+                    setSuccess(
+                      "Custom guide removed. Xtream will use its automatic guide.",
+                    );
+                    return;
+                  }
+                  const url = safeSourceUrl(value);
+                  if (!url) {
+                    setError("Use a valid HTTP or HTTPS XMLTV/EPG URL.");
+                    return;
+                  }
+                  props.onEpgUrl(url);
+                  setEpgDraft(url);
+                  setError("");
+                  setSuccess(
+                    "Program guide saved. Live TV will match channels by their TVG ID and name.",
+                  );
+                }}
+              >
+                <label className="grow">
+                  EPG / XMLTV URL
+                  <input
+                    name="epg"
+                    type="url"
+                    value={epgDraft}
+                    onChange={(event) => setEpgDraft(event.target.value)}
+                    placeholder="https://example.com/guide.xml"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <button>Save guide</button>
+                {(epgDraft || props.epgUrl) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEpgDraft("");
+                      props.onEpgUrl("");
+                      setSuccess(
+                        "Custom guide removed. Xtream will use its automatic guide.",
+                      );
+                    }}
+                  >
+                    Remove
+                  </button>
+                )}
+              </form>
+              <p className="hint">
+                TikTak TV loads the guide through your companion when available,
+                then falls back to a direct HTTPS request. M3U channels should
+                include tvg-id values for the most accurate matching.
+              </p>
+            </section>
+          </div>
+          <div hidden={section !== "addons"}>
+            <section className="settings-card">
+              <div className="card-heading">
+                <Plus />
+                <div>
+                  <h2>Add-ons</h2>
+                  <p>
+                    Bring your Stremio catalogs and HTTP or HTTPS streaming
+                    sources.
+                  </p>
+                </div>
+              </div>
+              <div className="addon-overview" aria-label="Add-on overview">
+                <article>
+                  <strong>{props.addons.length}</strong>
+                  <span>Installed</span>
+                </article>
+                <article>
+                  <strong>
+                    {
+                      props.addons.filter((addon) => addon.enabled !== false)
+                        .length
+                    }
+                  </strong>
+                  <span>Active</span>
+                </article>
+                <article>
+                  <strong>
+                    {props.addons.reduce(
+                      (total, addon) =>
+                        total + (addon.manifest.catalogs?.length ?? 0),
+                      0,
+                    )}
+                  </strong>
+                  <span>Catalogs</span>
+                </article>
+              </div>
+              <button
+                disabled={!!busy}
+                onClick={() =>
+                  void run("refresh", async () => {
+                    const result = await installMany(
+                      props.addons.map((a) => manifestUrl(a.base)),
+                    );
+                    props.onAddons(mergeAddons(props.addons, result.addons));
+                    setSuccess(
+                      result.failed
+                        ? `Refreshed ${result.addons.length} manifests; ${result.failed} could not be reached. Existing add-ons were kept.`
+                        : "All add-on manifests refreshed.",
+                    );
+                  })
+                }
+              >
+                Refresh installed manifests
+              </button>
+              <div className="addon-list">
+                {props.addons.map((a, index) => (
+                  <div
+                    className="addon"
+                    key={a.base}
+                    draggable
+                    onDragStart={(event) =>
+                      event.dataTransfer.setData(
+                        "text/addon-index",
+                        String(index),
+                      )
+                    }
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const from = Number(
+                        event.dataTransfer.getData("text/addon-index"),
+                      );
+                      if (!Number.isInteger(from) || from === index) return;
+                      const next = [...props.addons];
+                      const [moved] = next.splice(from, 1);
+                      next.splice(index, 0, moved);
+                      props.onAddons(next);
+                    }}
+                  >
+                    <div className="addon-symbol">
+                      <Globe2 />
+                    </div>
+                    <div>
+                      <strong>{a.manifest.name}</strong>
+                      <p>
+                        {a.manifest.resources?.some((r) =>
+                          typeof r === "string"
+                            ? r === "stream"
+                            : r.name === "stream",
+                        )
+                          ? "Streaming source"
+                          : a.manifest.resources?.some(
+                                (r) =>
+                                  (typeof r === "string" ? r : r.name) ===
+                                  "subtitles",
+                              )
+                            ? "Subtitle provider"
+                            : "Catalog / metadata only"}{" "}
+                        · {a.manifest.catalogs?.length ?? 0} catalogs ·{" "}
+                        {(a.manifest.types ?? []).join(", ")}
+                      </p>
+                    </div>
+                    <button
+                      className="icon-button"
+                      aria-label={`${a.enabled === false ? "Enable" : "Disable"} ${a.manifest.name}`}
+                      onClick={() =>
+                        props.onAddons(
+                          props.addons.map((addon, addonIndex) =>
+                            addonIndex === index
+                              ? { ...addon, enabled: addon.enabled === false }
+                              : addon,
+                          ),
+                        )
+                      }
+                    >
+                      {a.enabled === false ? "Off" : "On"}
+                    </button>
+                    <div className="addon-actions">
+                    <button
+                      className="icon-button"
+                      disabled={index === 0}
+                      aria-label={`Move ${a.manifest.name} up`}
+                      onClick={() => {
+                        const next = [...props.addons];
+                        [next[index - 1], next[index]] = [
+                          next[index],
+                          next[index - 1],
+                        ];
+                        props.onAddons(next);
+                      }}
+                    >
+                      <ArrowUp size={18} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      disabled={index === props.addons.length - 1}
+                      aria-label={`Move ${a.manifest.name} down`}
+                      onClick={() => {
+                        const next = [...props.addons];
+                        [next[index], next[index + 1]] = [
+                          next[index + 1],
+                          next[index],
+                        ];
+                        props.onAddons(next);
+                      }}
+                    >
+                      <ArrowDown size={18} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      disabled={!!busy}
+                      aria-label={`Test ${a.manifest.name}`}
+                      onClick={() =>
+                        void run(`test-${index}`, async () => {
+                          await installAddon(manifestUrl(a.base));
+                          setSuccess(`${a.manifest.name} is reachable.`);
+                        })
+                      }
+                    >
+                      <Activity size={18} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      aria-label={`Remove ${a.manifest.name}`}
+                      onClick={() => setPendingAddonRemoval(a.base)}
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.currentTarget;
+                  const url = String(new FormData(form).get("manifest"));
+                  void run("addon", async () => {
+                    const addon = await installAddon(url);
+                    props.onAddons([
+                      ...props.addons.filter((a) => a.base !== addon.base),
+                      addon,
+                    ]);
+                    setSuccess(`${addon.manifest.name} installed.`);
+                    form.reset();
+                  });
+                }}
+              >
+                <label className="grow">
+                  Manifest URL
+                  <input
+                    name="manifest"
+                    placeholder="https:// or http://…/manifest.json"
+                    required
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <button disabled={!!busy}>
+                  {busy === "addon" ? "Installing…" : "Install add-on"}
+                </button>
+              </form>
+              {pendingAddonRemoval && (
+                <div
+                  className="addon-remove-confirmation"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Remove add-on"
+                >
+                  <section>
+                    <h3>Remove add-on?</h3>
+                    <p>
+                      This removes the add-on from the current TikTakTV profile.
+                    </p>
+                    <div className="actions">
+                      <button
+                        type="button"
+                        className="remove-history"
+                        onClick={() => {
+                          props.onAddons(
+                            props.addons.filter(
+                              (addon) => addon.base !== pendingAddonRemoval,
+                            ),
+                          );
+                          setPendingAddonRemoval(null);
+                        }}
+                      >
+                        Remove
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPendingAddonRemoval(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </section>
+                </div>
+              )}
+              <p className="hint">
+                HTTP add-ons are supported through direct browser access or the
+                configured companion. In an HTTPS PWA, private LAN addresses may
+                still need an HTTPS tunnel or a same-network companion.
+              </p>
+              <details>
+                <summary>Install several add-ons from TikTakTV</summary>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const form = e.currentTarget;
+                    const input = String(new FormData(form).get("addons"));
+                    void run("bulk", async () => {
+                      const result = await installMany(addonUrls(input));
+                      props.onAddons(mergeAddons(props.addons, result.addons));
+                      setSuccess(
+                        `${result.addons.length} add-ons installed.${result.failed ? ` ${result.failed} could not be reached. Retry those separately.` : ""}`,
+                      );
+                      if (!result.failed) form.reset();
+                    });
+                  }}
+                >
+                  <label>
+                    Manifest URLs or add-ons JSON
+                    <textarea
+                      name="addons"
+                      rows={5}
+                      placeholder="One configured manifest URL per line"
+                      required
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <button disabled={!!busy}>Install all add-ons</button>
+                </form>
+              </details>
+              <p className="hint">
+                Catalogs provide discovery, not video. Install your own
+                streaming add-on for playback. Torrentio configured with TorBox
+                returns HTTPS streams. Raw torrent results can be resolved with
+                your TorBox key above. Native Cloudstream plug-ins cannot run in
+                a browser.
+              </p>
+            </section>
+          </div>
+          <div hidden={section !== "collections"}>
+            <CollectionManager
+              collections={props.collections}
+              onChange={props.onCollections}
+              addons={props.addons}
+              library={props.library}
+            />
+            <details className="advanced-catalog-settings">
+              <summary>Advanced add-on Home rows</summary>
+              <CatalogManager
+                addons={props.addons}
+                value={props.homeCatalogs}
+                onChange={props.onHomeCatalogs}
+              />
+            </details>
+            <section className="settings-card">
+              <h2>TMDB collections</h2>
+              <p>
+                For streaming-service, studio and network collections. TikTakTV
+                profile sync can override TikTak TV's shared TMDB connection.
+              </p>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const form = e.currentTarget;
+                  const credential = String(
+                    new FormData(form).get("tmdb"),
+                  ).trim();
+                  void run("tmdb", async () => {
+                    const { validateTmdbCredential } = await import("./tmdb");
+                    await validateTmdbCredential(credential);
+                    localStorage.setItem("nuvio:tmdb-key", credential);
+                    props.onTmdbKey(credential);
+                    setSuccess(
+                      "TMDB connected. Cast photos and filmographies are ready.",
+                    );
+                    form.reset();
+                  });
+                }}
+              >
+                <label>
+                  TMDB API key
+                  <input
+                    name="tmdb"
+                    type="password"
+                    defaultValue={props.tmdbKey}
+                    autoComplete="off"
+                    required
+                  />
+                </label>
+                <button disabled={!!busy}>
+                  {busy === "tmdb" ? "Checking…" : "Connect TMDB"}
+                </button>
+              </form>
+            </section>
+          </div>
+          <div hidden={section !== "general"}>
+            <DataTools
+              addons={props.addons}
+              collections={props.collections}
+              library={props.library}
+              provider={props.provider}
+              epgUrl={props.epgUrl}
+              torboxKey={props.torboxKey}
+              realDebridKey={props.realDebridKey}
+              autoplay={props.autoplay}
+              homeCatalogs={props.homeCatalogs}
+              tmdbKey={props.tmdbKey}
+              onCollections={props.onCollections}
+              onRestore={props.onRestore}
+              onSecureRestore={async (setup) => {
+                const summary = await props.onRestore(setup.transfer);
+                storeProvider(setup.provider, true);
+                props.onProvider(setup.provider);
+                props.onEpgUrl(setup.epgUrl);
+                save("torbox-key", setup.torboxKey);
+                sessionStorage.removeItem("nuvio:torbox-key");
+                props.onTorboxKey(setup.torboxKey);
+                save("realdebrid-key", setup.realDebridKey);
+                sessionStorage.removeItem("nuvio:realdebrid-key");
+                props.onRealDebridKey(setup.realDebridKey);
+                save("autoplay", setup.autoplay);
+                props.onAutoplay(setup.autoplay);
+                save("home-catalogs", setup.homeCatalogs);
+                props.onHomeCatalogs(setup.homeCatalogs);
+                if (setup.tmdbKey) {
+                  localStorage.setItem("nuvio:tmdb-key", setup.tmdbKey);
+                  props.onTmdbKey(setup.tmdbKey);
+                }
+                window.dispatchEvent(new Event("connections-changed"));
+                return `${summary} Private connections and playback preferences restored.`;
+              }}
+            />
+          </div>
+          <div hidden={section !== "live"}>
+            <section className="settings-card">
+              <div className="card-heading">
+                <Globe2 />
+                <div>
+                  <h2>Playlists & direct streams</h2>
+                  <p>Open an M3U playlist or HTTP/HTTPS video.</p>
+                </div>
+              </div>
+              <form
+                className="inline-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  const url = safeSourceUrl(
+                    new FormData(form).get("playlist-url"),
+                  );
+                  if (!url) {
+                    setError("Use a valid HTTP or HTTPS M3U playlist URL.");
+                    return;
+                  }
+                  void run("playlist", async () => {
+                    const response = await sourceFetch(url, {
+                      cache: "no-store",
+                      credentials: "omit",
+                      referrerPolicy: "no-referrer",
+                    });
+                    if (!response.ok)
+                      throw new Error(
+                        `The playlist returned HTTP ${response.status}.`,
+                      );
+                    const declared = Number(
+                      response.headers.get("content-length") ?? 0,
+                    );
+                    if (declared > 15_000_000)
+                      throw new Error("Choose a playlist smaller than 15 MB.");
+                    const text = await response.text();
+                    if (text.length > 15_000_000)
+                      throw new Error("Choose a playlist smaller than 15 MB.");
+                    const digest = await crypto.subtle.digest(
+                      "SHA-256",
+                      new TextEncoder().encode(text),
+                    );
+                    const scope = Array.from(new Uint8Array(digest))
+                      .map((value) => value.toString(16).padStart(2, "0"))
+                      .join("");
+                    const items = parsePlaylist(text, scope);
+                    props.onPlaylist(items);
+                    setSuccess(
+                      `${items.length.toLocaleString()} channels imported from the playlist URL.`,
+                    );
+                    form.reset();
+                  });
+                }}
+              >
+                <label className="grow">
+                  M3U playlist URL
+                  <input
+                    name="playlist-url"
+                    type="url"
+                    placeholder="http://provider.example/get.php?..."
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    required
+                  />
+                </label>
+                <button disabled={!!busy}>Import URL</button>
+              </form>
+              <label className="button file-button">
+                Import M3U playlist
+                <input
+                  type="file"
+                  accept=".m3u,.m3u8,text/plain,audio/x-mpegurl"
+                  disabled={!!busy}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    void run("playlist", async () => {
+                      if (file.size > 15_000_000)
+                        throw new Error(
+                          "Choose a playlist smaller than 15 MB.",
+                        );
+                      const text = await file.text();
+                      const digest = await crypto.subtle.digest(
+                        "SHA-256",
+                        new TextEncoder().encode(text),
+                      );
+                      const scope = Array.from(new Uint8Array(digest))
+                        .map((v) => v.toString(16).padStart(2, "0"))
+                        .join("");
+                      const items = parsePlaylist(text, scope);
+                      props.onPlaylist(items);
+                      setSuccess(
+                        `${items.length.toLocaleString()} channels imported for this session.`,
+                      );
+                    });
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+              <form
+                className="inline-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const url = safeSourceUrl(
+                    new FormData(e.currentTarget).get("stream"),
+                  );
+                  if (!url) {
+                    setError("Use a valid HTTP or HTTPS video URL.");
+                    return;
+                  }
+                  props.onStream(url);
+                }}
+              >
+                <label className="grow">
+                  Video URL
+                  <input
+                    name="stream"
+                    type="url"
+                    placeholder="http://example.com/video.m3u8"
+                    required
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <button>Open stream</button>
+              </form>
+            </section>
+          </div>
+          <div hidden={section !== "general"}>
+            <section className="settings-card">
+              <h2>Appearance</h2>
+              <p>Choose your accent.</p>
+              <div className="swatches">
+                {[
+                  ["Violet", "#9b5cff"],
+                  ["Ocean", "#397cff"],
+                  ["Rose", "#ff5f9e"],
+                  ["Emerald", "#57d67a"],
+                  ["Crimson", "#ff5263"],
+                ].map(([label, color]) => (
+                  <button
+                    key={color}
+                    className={props.accent === color ? "selected" : ""}
+                    onClick={() => props.onAccent(color)}
+                    aria-label={`${label} accent`}
+                    aria-pressed={props.accent === color}
+                  >
+                    <span style={{ background: color }} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </section>
+            <section className="settings-card">
+              <h2>At home on your home screen</h2>
+              <p>
+                On iPhone or iPad, open this site in Safari, tap Share, then Add
+                to Home Screen. The interface is available offline; streaming
+                still needs an internet connection.
+              </p>
+              <h3>About this fork</h3>
+              <p>
+                TikTakTV is an independent GPL-3.0 media experience.
+                It supports browser-compatible sources, profile sync, Trakt,
+                downloads, Live TV, Sports, YouTube, friend setups, subtitles,
+                and debrid-backed playback across desktop and mobile PWAs.
+              </p>
+              <div className="actions">
+                <a
+                  href={
+                    safeUrl(import.meta.env.VITE_SOURCE_URL) ??
+                    "https://github.com/zachgus33/TikTakTV"
+                  }
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Source code <ExternalLink size={14} />
+                </a>
+                <a
+                  href={`${import.meta.env.BASE_URL}LICENSE.txt`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  GPL-3.0 license <ExternalLink size={14} />
+                </a>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

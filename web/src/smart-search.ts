@@ -1,0 +1,146 @@
+export function normalizeSearchText(value: string) {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+const optionalTitleWords = new Set(["a", "an", "and", "of", "the", "to"]);
+
+export function correctionSearchProbes(query: string) {
+  const normalized = normalizeSearchText(query);
+  if (!normalized) return [];
+  const words = normalized
+    .split(" ")
+    .filter((word) => word.length >= 4)
+    .sort((left, right) => right.length - left.length);
+  const probes: string[] = [];
+  for (const word of words) {
+    if (word !== normalized) probes.push(word);
+    if (word.length >= 6)
+      probes.push(word.slice(0, Math.max(4, Math.ceil(word.length * 0.55))));
+  }
+  return [...new Set(probes)].slice(0, 4);
+}
+
+export function rankExactTitleFirst<T extends { name: string }>(
+  items: T[],
+  query: string,
+) {
+  const normalizedQuery = normalizeSearchText(query);
+  const score = (name: string) => {
+    const title = normalizeSearchText(name);
+    if (!normalizedQuery) return 0;
+    if (title === normalizedQuery) return 4;
+    if (title.startsWith(`${normalizedQuery} `)) return 3;
+    if (title.includes(` ${normalizedQuery} `) || title.endsWith(` ${normalizedQuery}`)) return 2;
+    if (title.includes(normalizedQuery)) return 1;
+    return 0;
+  };
+  return [...items].sort((left, right) => score(right.name) - score(left.name));
+}
+
+/** Catalogs often report a series as either "2014" or "2014–2019". */
+export function dedupeSearchTitles<T extends { name: string; type: string; year?: string; id?: string }>(
+  items: T[],
+): T[] {
+  const results: T[] = [];
+  const positions = new Map<string, number>();
+  const quality = (item: T) =>
+    (item.type === "series" && /\b\d{4}\s*[-–—]\s*\d{4}\b/.test(item.year ?? "") ? 2 : 0) +
+    (/^tt\d+$/.test(item.id ?? "") ? 1 : 0);
+  for (const item of items) {
+    const year = item.type === "series"
+      ? /^\s*(\d{4})/.exec(item.year ?? "")?.[1] ?? item.year ?? ""
+      : item.year ?? "";
+    const key = `${item.type}:${normalizeSearchText(item.name)}:${year}`;
+    const index = positions.get(key);
+    if (index === undefined) {
+      positions.set(key, results.length);
+      results.push(item);
+    } else if (quality(item) > quality(results[index])) {
+      results[index] = item;
+    }
+  }
+  return results;
+}
+
+export function hasRelevantTitle(query: string, titles: string[]) {
+  const normalizedQuery = normalizeSearchText(query);
+  return !!normalizedQuery && titles.some((title) =>
+    normalizeSearchText(title).includes(normalizedQuery),
+  );
+}
+
+function editDistance(left: string, right: string) {
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let l = 1; l <= left.length; l += 1) {
+    let diagonal = row[0];
+    row[0] = l;
+    for (let r = 1; r <= right.length; r += 1) {
+      const previous = row[r];
+      row[r] = Math.min(
+        row[r] + 1,
+        row[r - 1] + 1,
+        diagonal + (left[l - 1] === right[r - 1] ? 0 : 1),
+      );
+      diagonal = previous;
+    }
+  }
+  return row[right.length];
+}
+
+export function closestTitleCorrection(query: string, titles: string[]) {
+  const normalizedQuery = normalizeSearchText(query);
+  if (normalizedQuery.length < 4) return "";
+  const queryWords = normalizedQuery.split(" ");
+  let best = { title: "", distance: Number.POSITIVE_INFINITY };
+  for (const title of titles) {
+    const normalizedTitle = normalizeSearchText(title);
+    if (!normalizedTitle || normalizedTitle === normalizedQuery) continue;
+    let comparedQueryWords = queryWords;
+    let comparedTitleWords = normalizedTitle.split(" ");
+    if (comparedTitleWords.length !== comparedQueryWords.length) {
+      if (queryWords.length < 2) continue;
+      comparedQueryWords = queryWords.filter(
+        (word) => !optionalTitleWords.has(word),
+      );
+      comparedTitleWords = comparedTitleWords.filter(
+        (word) => !optionalTitleWords.has(word),
+      );
+    }
+    if (comparedTitleWords.length !== comparedQueryWords.length) continue;
+    const distances = comparedQueryWords.map((word, index) =>
+      editDistance(word, comparedTitleWords[index]),
+    );
+    if (
+      distances.some(
+        (distance, index) =>
+          distance /
+            Math.max(
+              comparedQueryWords[index].length,
+              comparedTitleWords[index].length,
+            ) >
+          0.34,
+      )
+    )
+      continue;
+    const comparedQuery = comparedQueryWords.join(" ");
+    const comparedTitle = comparedTitleWords.join(" ");
+    const distance = editDistance(comparedQuery, comparedTitle);
+    const maximumDistance =
+      comparedQueryWords.length === 1 && comparedQuery.length < 8
+        ? 1
+        : Math.max(1, Math.ceil(comparedQuery.length * 0.2));
+    if (
+      distance > maximumDistance ||
+      distance >= best.distance
+    )
+      continue;
+    best = { title, distance };
+  }
+  return best.title;
+}

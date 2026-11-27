@@ -1,0 +1,719 @@
+import { sourceFetch } from "./connection";
+import { addonResourceUrl } from "./addon-urls";
+import type {
+  Addon,
+  Category,
+  Episode,
+  Item,
+  Kind,
+  Manifest,
+  Programme,
+  Provider,
+  Stream,
+  Subtitle,
+} from "./types";
+import {
+  addonQuarantined,
+  recordAddonFailure,
+  recordAddonSuccess,
+} from "./addon-health";
+
+const responseCache = new Map<string, { expires: number; value: unknown }>();
+export const clearSourceCache = () => responseCache.clear();
+const cacheableRequest = (url: string) =>
+  /\/manifest\.json(?:[?#]|$)|\/catalog\/|\/meta\//i.test(url);
+
+export function safeUrl(value: unknown): string | undefined {
+  try {
+    const u = new URL(String(value));
+    return u.protocol === "https:" && !u.username && !u.password
+      ? u.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+export function safeSourceUrl(value: unknown): string | undefined {
+  try {
+    const url = new URL(String(value));
+    return ["https:", "http:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function safeArtwork(value: unknown, base: string): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    const url = new URL(value.trim(), `${base.replace(/\/$/, "")}/`);
+    // Keep provider supplied HTTP artwork intact. ChannelArt securely fetches
+    // it through the signed-in companion; changing it to HTTPS breaks hosts
+    // that only expose their picon service over HTTP.
+    return ["http:", "https:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+export function normalizeServer(value: string): string {
+  const url = safeSourceUrl(value.trim());
+  if (!url) throw new Error("Use a valid HTTP or HTTPS IPTV server address.");
+  const u = new URL(url);
+  u.pathname = u.pathname
+    .replace(/\/(player_api|get)\.php.*$/i, "")
+    .replace(/\/+$/, "");
+  u.search = "";
+  u.hash = "";
+  return u.href.replace(/\/$/, "");
+}
+export async function json<T>(
+  url: string,
+  signal?: AbortSignal,
+  timeoutMs = 20000,
+): Promise<T> {
+  const cacheEnabled = import.meta.env.MODE !== "test" && cacheableRequest(url);
+  const cached = responseCache.get(url);
+  if (cacheEnabled && cached && cached.expires > Date.now())
+    return cached.value as T;
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  signal?.addEventListener("abort", cancel, { once: true });
+  const timer = setTimeout(cancel, timeoutMs);
+  try {
+    const r = await sourceFetch(url, {
+      signal: controller.signal,
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+    });
+    if (!r.ok) {
+      const problem = (await r.clone().json().catch(() => null)) as {
+        error?: unknown;
+      } | null;
+      if (r.status === 403 && new URL(url).hostname === "friend.tiktaktv.invalid") {
+        if (problem?.error === "Shared add-on access expired.")
+          throw new Error(
+            "Shared add-on access expired. Re-enter the friend code in Settings → Playback → Friend setup to refresh the shared setup.",
+          );
+      }
+      if (
+        new URL(url).protocol === "http:" &&
+        /private destinations?|local network/i.test(String(problem?.error ?? ""))
+      )
+        throw new Error(
+          "This private HTTP add-on is valid, but TikTak TV's hosted companion cannot reach devices inside your LAN. Give the add-on an HTTPS tunnel/reverse proxy, or use a same-network companion.",
+        );
+      throw new Error(
+        `The add-on source returned HTTP ${r.status}. Check its connection in Settings → Add-ons and try again.`,
+      );
+    }
+    const value = (await r.json()) as T;
+    if (cacheEnabled)
+      responseCache.set(url, { expires: Date.now() + 120_000, value });
+    return value;
+  } catch (e) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    if (e instanceof TypeError)
+      throw new Error(
+        "Cannot reach this source. Check your connection, HTTPS address, and whether the provider allows browser access (CORS). GitHub Pages cannot bypass this.",
+      );
+    if (controller.signal.aborted)
+      throw new Error("The source took too long to respond. Please try again.");
+    if (e instanceof SyntaxError)
+      throw new Error(
+        "The source did not return a valid API response. Check the server address.",
+      );
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+export function xtreamUrl(
+  p: Provider,
+  action?: string,
+  params: Record<string, string> = {},
+) {
+  const q = new URLSearchParams({
+    username: p.username,
+    password: p.password,
+    ...params,
+  });
+  if (action) q.set("action", action);
+  return `${p.server}/player_api.php?${q}`;
+}
+export function streamUrl(
+  p: Provider,
+  type: Kind,
+  id: string,
+  extension?: string,
+) {
+  const ext =
+    type === "live"
+      ? /^[a-z0-9]+$/i.test(extension ?? "")
+        ? extension
+        : "ts"
+      : /^[a-z0-9]+$/i.test(extension ?? "")
+        ? extension
+        : "mp4";
+  return `${p.server}/${type === "movie" ? "movie" : type === "series" ? "series" : "live"}/${encodeURIComponent(p.username)}/${encodeURIComponent(p.password)}/${encodeURIComponent(id)}.${ext}`;
+}
+export async function connectProvider(
+  input: Omit<Provider, "scope">,
+  signal?: AbortSignal,
+): Promise<Provider> {
+  const server = normalizeServer(input.server);
+  const p = { ...input, server, scope: "" };
+  const data = await json<{
+    user_info?: { auth?: number | string; status?: string };
+  }>(xtreamUrl(p), signal);
+  if (String(data.user_info?.auth) !== "1")
+    throw new Error(
+      "The provider rejected these credentials. Check your username and password.",
+    );
+  if (
+    data.user_info?.status &&
+    data.user_info.status.toLowerCase() !== "active"
+  )
+    throw new Error("This IPTV account is not active. Contact your provider.");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${server}|${p.username}`),
+  );
+  return {
+    ...p,
+    scope: Array.from(new Uint8Array(digest))
+      .slice(0, 12)
+      .map((v) => v.toString(16).padStart(2, "0"))
+      .join(""),
+  };
+}
+const resource = { live: "live", movie: "vod", series: "series" };
+export async function categories(
+  p: Provider,
+  type: Kind,
+  signal?: AbortSignal,
+): Promise<Category[]> {
+  const data = await json<Record<string, unknown>[]>(
+    xtreamUrl(p, `get_${resource[type]}_categories`),
+    signal,
+  );
+  if (!Array.isArray(data))
+    throw new Error("The provider returned an invalid category list.");
+  return data.map((x) => ({
+    id: String(x.category_id),
+    name: String(x.category_name ?? "Uncategorized"),
+  }));
+}
+export async function providerItems(
+  p: Provider,
+  type: Kind,
+  category: string,
+  signal?: AbortSignal,
+  options: { guideOnly?: boolean } = {},
+): Promise<Item[]> {
+  const action =
+    type === "series" ? "get_series" : `get_${resource[type]}_streams`;
+  const data = await json<Record<string, unknown>[]>(
+    xtreamUrl(p, action, category ? { category_id: category } : {}),
+    signal,
+  );
+  if (!Array.isArray(data))
+    throw new Error("The provider returned an invalid library.");
+  return data
+    .filter((x) => x.stream_id != null || x.series_id != null)
+    .filter(
+      (x) =>
+        !options.guideOnly ||
+        String(x.epg_channel_id ?? x.tvg_id ?? "").trim().length > 0,
+    )
+    .map((x) => ({
+      id: String(x.stream_id ?? x.series_id),
+      name: String(x.name ?? "Untitled"),
+      type,
+      source: "xtream",
+      provider: p.scope,
+      poster: safeArtwork(x.stream_icon ?? x.cover, p.server),
+      background: safeUrl(
+        Array.isArray(x.backdrop_path) ? x.backdrop_path[0] : x.backdrop_path,
+      ),
+      category: String(x.category_id ?? ""),
+      epgId: String(x.epg_channel_id ?? x.tvg_id ?? ""),
+      extension: String(
+        x.container_extension ?? (type === "live" ? "ts" : "mp4"),
+      ),
+      url:
+        type === "live" && typeof x.direct_source === "string"
+          ? safeSourceUrl(x.direct_source)
+          : undefined,
+      rating: x.rating ? String(x.rating) : undefined,
+      year: String(x.year ?? x.releaseDate ?? "").slice(0, 4),
+      description: String(x.plot ?? ""),
+    }));
+}
+export async function providerDetail(
+  p: Provider,
+  item: Item,
+  signal?: AbortSignal,
+): Promise<{ item: Item; episodes: Episode[] }> {
+  if (item.type === "live") return { item, episodes: [] };
+  const data = await json<{
+    info?: Record<string, unknown>;
+    movie_data?: { container_extension?: string };
+    episodes?: Record<string, Record<string, unknown>[]>;
+  }>(
+    xtreamUrl(p, item.type === "series" ? "get_series_info" : "get_vod_info", {
+      [item.type === "series" ? "series_id" : "vod_id"]: item.id,
+    }),
+    signal,
+  );
+  const info = data.info ?? {};
+  const episodes = Object.entries(data.episodes ?? {})
+    .flatMap(([season, rows]) =>
+      Array.isArray(rows)
+        ? rows.map((row) => ({
+            id: String(row.id),
+            name: String(row.title ?? `Episode ${row.episode_num}`),
+            season: Number(row.season ?? season),
+            episode: Number(row.episode_num),
+            extension: String(row.container_extension ?? "mp4"),
+          }))
+        : [],
+    )
+    .sort((a, b) => a.season - b.season || a.episode - b.episode);
+  return {
+    item: {
+      ...item,
+      description: String(
+        info.plot ?? info.description ?? item.description ?? "",
+      ),
+      poster: safeUrl(info.movie_image ?? info.cover) ?? item.poster,
+      background:
+        safeUrl(
+          Array.isArray(info.backdrop_path)
+            ? info.backdrop_path[0]
+            : info.backdrop_path,
+        ) ?? item.background,
+      extension: data.movie_data?.container_extension ?? item.extension,
+      runtime: info.duration ? String(info.duration) : undefined,
+      genres:
+        typeof info.genre === "string"
+          ? info.genre.split(/[,/]/).map((s) => s.trim())
+          : [],
+    },
+    episodes,
+  };
+}
+export function decodeText(value: unknown): string {
+  const text = String(value ?? "");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      Uint8Array.from(atob(text), (c) => c.charCodeAt(0)),
+    );
+  } catch {
+    return text;
+  }
+}
+export async function epg(
+  p: Provider,
+  id: string,
+  signal?: AbortSignal,
+): Promise<Programme[]> {
+  const data = await json<{ epg_listings?: Record<string, unknown>[] }>(
+    xtreamUrl(p, "get_short_epg", { stream_id: id, limit: "12" }),
+    signal,
+  );
+  return (data.epg_listings ?? [])
+    .map((x, i) => ({
+      id: String(x.id ?? i),
+      title: decodeText(x.title),
+      description: decodeText(x.description),
+      start: Number(x.start_timestamp) * 1000,
+      end: Number(x.stop_timestamp ?? x.end_timestamp) * 1000,
+    }))
+    .filter((x) => Number.isFinite(x.start) && Number.isFinite(x.end))
+    .sort((a, b) => a.start - b.start);
+}
+export const defaultAddon: Addon = {
+  base: "https://v3-cinemeta.strem.io",
+  manifest: {
+    id: "com.linvo.cinemeta",
+    name: "TikTakTV Catalog Addon",
+    types: ["movie", "series"],
+    resources: ["catalog", "meta"],
+    catalogs: [
+      {
+        id: "top",
+        type: "movie",
+        name: "Popular movies",
+        extra: [{ name: "search" }],
+      },
+      {
+        id: "top",
+        type: "series",
+        name: "Popular series",
+        extra: [{ name: "search" }],
+      },
+    ],
+  },
+};
+export const defaultSubtitleAddon: Addon = {
+  base: "https://opensubtitles-v3.strem.io",
+  manifest: {
+    id: "org.stremio.opensubtitlesv3",
+    name: "OpenSubtitles v3",
+    description: "OpenSubtitles v3 Addon for Stremio",
+    types: ["movie", "series"],
+    resources: ["subtitles"],
+    catalogs: [],
+  },
+};
+export const defaultAddons: Addon[] = [defaultAddon, defaultSubtitleAddon];
+export async function installAddon(input: string): Promise<Addon> {
+  const normalized = safeSourceUrl(
+    input.trim().replace(/^stremio:\/\//, "https://"),
+  );
+  if (!normalized)
+    throw new Error("Enter the HTTP or HTTPS add-on URL supplied by your add-on.");
+  const parsed = new URL(normalized);
+  if (!parsed.pathname.endsWith("/manifest.json"))
+    parsed.pathname = `${parsed.pathname.replace(/\/$/, "")}/manifest.json`;
+  const url = parsed.href;
+  const manifest = await json<Manifest>(url);
+  if (!manifest.id || !manifest.name || !Array.isArray(manifest.resources))
+    throw new Error("This is not a valid Stremio add-on manifest.");
+  parsed.pathname = parsed.pathname.slice(0, -14);
+  return { base: parsed.href.replace(/\/$/, ""), manifest };
+}
+export function fromMeta(meta: Record<string, unknown>, addon: Addon): Item {
+  return {
+    id: String(meta.id),
+    name: String(meta.name ?? "Untitled"),
+    type: meta.type === "series" ? "series" : "movie",
+    source: "addon",
+    provider: addon.base,
+    poster: safeArtwork(meta.poster, addon.base),
+    background: safeArtwork(meta.background, addon.base),
+    description: String(meta.description ?? ""),
+    year: String(meta.releaseInfo ?? meta.year ?? ""),
+    released: typeof meta.released === "string" ? meta.released : undefined,
+    rating: meta.imdbRating ? String(meta.imdbRating) : undefined,
+    genres: Array.isArray(meta.genres) ? meta.genres.map(String) : [],
+    runtime: String(meta.runtime ?? ""),
+    cast: Array.isArray(meta.cast) ? meta.cast.map(String).slice(0, 12) : [],
+    directors: Array.isArray(meta.director)
+      ? meta.director.map(String)
+      : typeof meta.director === "string"
+        ? [meta.director]
+        : [],
+  };
+}
+export async function catalog(
+  addon: Addon,
+  type: string,
+  id: string,
+  search = "",
+  signal?: AbortSignal,
+  genre?: string,
+): Promise<Item[]> {
+  const parameters = [
+    search ? `search=${encodeURIComponent(search)}` : "",
+    genre ? `genre=${encodeURIComponent(genre)}` : "",
+  ].filter(Boolean);
+  const extra = parameters.join("&");
+  const data = await json<{ metas?: Record<string, unknown>[] }>(
+    addonResourceUrl(addon.base, "catalog", type, id, extra || undefined),
+    signal,
+  );
+  return (data.metas ?? []).slice(0, 200).map((m) => fromMeta(m, addon));
+}
+export async function addonDetail(
+  item: Item,
+  signal?: AbortSignal,
+): Promise<{ item: Item; episodes: Episode[] }> {
+  if (item.id.startsWith("tmdb:")) {
+    const { resolveTmdb } = await import("./tmdb");
+    item = await resolveTmdb(item, signal);
+  }
+  const data = await json<{ meta: Record<string, unknown> }>(
+    addonResourceUrl(item.provider!, "meta", item.type, item.id),
+    signal,
+  );
+  if (!data.meta) throw new Error("No details available from this add-on.");
+  const m = data.meta;
+  const episodes: Episode[] = (Array.isArray(m.videos) ? m.videos : [])
+      .map((v) => ({
+        id: String(v.id),
+        name: String(v.title ?? v.name ?? `Episode ${v.episode}`),
+        season: Number(v.season ?? 1),
+        episode: Number(v.episode ?? 1),
+        released: v.released,
+        rating:
+          v.imdbRating != null
+            ? String(v.imdbRating)
+            : v.rating != null
+              ? String(v.rating)
+              : undefined,
+      }))
+      .sort((a, b) => a.season - b.season || a.episode - b.episode);
+  const seasons = [...new Set(episodes.map((episode) => episode.season))]
+    .filter((season) => Number.isInteger(season) && season > 0)
+    .sort((a, b) => a - b);
+  const missingSeason = !seasons.length || seasons[0] > 1 ||
+    seasons.some((season, index) => index > 0 && season > seasons[index - 1] + 1);
+  // An add-on can omit a whole season even when its search card looks correct.
+  // Fill gaps from the canonical IMDb record when it contains more episodes.
+  if (
+    item.type === "series" &&
+    item.provider !== defaultAddon.base &&
+    /^tt\d+$/.test(item.id) &&
+    missingSeason
+  ) {
+    const fallbackController = new AbortController();
+    const cancelFallback = () => fallbackController.abort();
+    if (signal?.aborted) cancelFallback();
+    signal?.addEventListener("abort", cancelFallback, { once: true });
+    const fallbackTimer = setTimeout(cancelFallback, 2500);
+    try {
+      const canonical = await addonDetail(
+        { ...item, provider: defaultAddon.base },
+        fallbackController.signal,
+      );
+      const seen = new Set(episodes.map((episode) => `${episode.season}:${episode.episode}`));
+      const missing = canonical.episodes.filter((episode) =>
+        !seen.has(`${episode.season}:${episode.episode}`),
+      );
+      if (missing.length) {
+        episodes.push(...missing);
+        episodes.sort((a, b) => a.season - b.season || a.episode - b.episode);
+      }
+    } catch {
+      // Keep the add-on's episodes if the public metadata source is unavailable.
+    } finally {
+      clearTimeout(fallbackTimer);
+      signal?.removeEventListener("abort", cancelFallback);
+    }
+  }
+  return {
+    item: fromMeta(m, { base: item.provider!, manifest: { id: "", name: "" } }),
+    episodes,
+  };
+}
+export async function addonStreams(
+  addons: Addon[],
+  item: Item,
+  id: string,
+  signal?: AbortSignal,
+  onSource?: (streams: Stream[], addon: Addon) => void,
+) {
+  const eligible = addons.filter(
+    (a) =>
+      a.enabled !== false &&
+      a.manifest.resources?.some((r) =>
+        typeof r === "string"
+          ? r === "stream"
+          : r.name === "stream" &&
+            (!r.types?.length || r.types.includes(item.type)) &&
+            (!r.idPrefixes?.length ||
+              r.idPrefixes.some((p) => id.startsWith(p))),
+      ),
+  );
+  const active = eligible.filter((addon) => !addonQuarantined(addon));
+  // Match Mobile Enhanced: start every compatible provider immediately. A
+  // fixed-size pool allowed the first slow add-ons to prevent later providers
+  // (notably Debridio) from even starting until their timeouts expired.
+  // Autoplay consumes onSource immediately; the complete result remains
+  // available for the manual source list and downloads.
+  const results: PromiseSettledResult<Stream[]>[] = Array(active.length);
+  const loadOne = async (addon: Addon, index: number) => {
+    try {
+      const data = await json<{ streams?: Stream[] }>(
+        addonResourceUrl(addon.base, "stream", item.type, id),
+        signal,
+        6500,
+      );
+      recordAddonSuccess(addon);
+      const streams = (data.streams ?? []).map((s) => ({
+        ...s,
+        addonName: addon.manifest.name,
+        addonId: addon.base,
+        name: s.name ?? addon.manifest.name,
+      }));
+      onSource?.(streams, addon);
+      results[index] = { status: "fulfilled", value: streams };
+    } catch (reason) {
+      recordAddonFailure(addon, reason);
+      results[index] = { status: "rejected", reason };
+    }
+  };
+  await Promise.all(active.map(loadOne));
+  const failureReason = (error: unknown) => {
+    const detail = error instanceof Error ? error.message : "";
+    if (/HTTP \d{3}/.test(detail)) return detail.match(/HTTP \d{3}/)![0];
+    if (/too long|timed out/i.test(detail)) return "Timed out";
+    if (/blocked direct browser access/i.test(detail))
+      return "Playback service unavailable; browser access blocked";
+    if (/browser access|CORS|Cannot reach/i.test(detail))
+      return "Browser access blocked or source unreachable";
+    if (/valid API response/i.test(detail)) return "Invalid add-on response";
+    return "Request failed";
+  };
+  return {
+    streams: results.flatMap((r) => (r.status === "fulfilled" ? r.value : [])),
+    failed: results.filter((r) => r.status === "rejected").length,
+    eligible: eligible.length,
+    count: active.length,
+    quarantined: eligible.length - active.length,
+    installedStreaming: addons.filter(
+      (a) =>
+        a.enabled !== false &&
+        a.manifest.resources?.some((r) =>
+          typeof r === "string" ? r === "stream" : r.name === "stream",
+        ),
+    ).length,
+    sources: eligible.map((addon) => {
+      const activeIndex = active.indexOf(addon);
+      if (activeIndex < 0)
+        return {
+          name: addon.manifest.name,
+          status: "paused" as const,
+          streams: 0,
+        };
+      const result = results[activeIndex];
+      return result?.status === "fulfilled"
+        ? {
+            name: addon.manifest.name,
+            status: "responded" as const,
+            streams: result.value.length,
+          }
+        : {
+            name: addon.manifest.name,
+            status: "failed" as const,
+            streams: 0,
+            reason: result?.status === "rejected"
+              ? failureReason(result.reason)
+              : "Request failed",
+          };
+    }),
+  };
+}
+export async function addonSubtitles(
+  addons: Addon[],
+  item: Item,
+  id: string,
+  extras?: {
+    filename?: string;
+    videoHash?: string;
+    videoSize?: number;
+  },
+  signal?: AbortSignal,
+): Promise<Subtitle[]> {
+  const eligible = addons.filter(
+    (a) =>
+      a.enabled !== false &&
+      a.manifest.resources?.some((r) =>
+        typeof r === "string"
+          ? r === "subtitles" || r === "subtitle"
+          : (r.name === "subtitles" || r.name === "subtitle") &&
+            (!r.types?.length || r.types.includes(item.type)) &&
+            (!r.idPrefixes?.length ||
+              r.idPrefixes.some((p) => id.startsWith(p))),
+      ),
+  );
+  const results = await Promise.allSettled(
+    eligible.map(async (a) => {
+      const extra = [
+        extras?.videoHash
+          ? `videoHash=${encodeURIComponent(extras.videoHash)}`
+          : "",
+        extras?.videoSize && extras.videoSize > 0
+          ? `videoSize=${Math.round(extras.videoSize)}`
+          : "",
+        extras?.filename
+          ? `filename=${encodeURIComponent(extras.filename)}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("&");
+      const data = await json<{ subtitles?: Subtitle[] }>(
+        addonResourceUrl(
+          a.base,
+          "subtitles",
+          item.type,
+          id,
+          extra || undefined,
+        ),
+        signal,
+      );
+      return (data.subtitles ?? [])
+        .filter((s) => !!safeUrl(s.url))
+        .map((subtitle) => ({
+          ...subtitle,
+          source: "addon" as const,
+          name:
+            subtitle.name ??
+            subtitle.id ??
+            subtitle.lang ??
+            a.manifest.name,
+        }));
+    }),
+  );
+  return results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+}
+export function parsePlaylist(text: string, scope: string): Item[] {
+  if (!text.trim().startsWith("#EXTM3U"))
+    throw new Error("Choose a valid M3U playlist.");
+  if (
+    text.includes("#EXT-X-TARGETDURATION") ||
+    text.includes("#EXT-X-STREAM-INF")
+  )
+    throw new Error(
+      "This is a video manifest. Use Open stream with its HTTPS URL instead.",
+    );
+  let meta:
+    | { name: string; poster?: string; category?: string; epgId?: string }
+    | undefined;
+  const items: Item[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.startsWith("#EXTINF:")) {
+      const attrs = Object.fromEntries(
+        [...line.matchAll(/([\w-]+)="([^"]*)"/g)].map((m) => [m[1], m[2]]),
+      );
+      meta = {
+        name:
+          line.match(/^#EXTINF:(?:[^",]|"[^"]*")*,(.*)$/)?.[1]?.trim() ||
+          attrs["tvg-name"] ||
+          "Channel",
+        poster: safeUrl(attrs["tvg-logo"]),
+        category: attrs["group-title"] || "Other",
+        epgId: attrs["tvg-id"] || undefined,
+      };
+    } else if (line && !line.startsWith("#") && meta) {
+      // Reject header hacks. HTTP channels are secured through the companion.
+      const url = line.includes("|") ? undefined : safeSourceUrl(line);
+      if (url)
+        items.push({
+          ...meta,
+          id: String(items.length),
+          source: "playlist",
+          provider: scope,
+          type: "live",
+          url,
+        });
+      meta = undefined;
+    }
+  }
+  if (!items.length)
+    throw new Error(
+      "No HTTP or HTTPS channels were found. Streams requiring custom inline headers are not supported.",
+    );
+  return items;
+}
