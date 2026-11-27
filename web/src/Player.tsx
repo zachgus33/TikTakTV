@@ -1173,6 +1173,7 @@ function VideoPlayer({
     let intentionalSeekUntil = 0;
     let playbackStartedAt = 0;
     let playbackCommitted = false;
+    let wasPlayingBeforeHidden = false;
     setError("");
     setNotice("");
     setQuality([]);
@@ -1221,8 +1222,18 @@ function VideoPlayer({
         runtimeSeconds(playback.item.runtime) || video.duration,
         playback.episode,
       );
-    const persistVisible = () => {
-      if (document.visibilityState === "hidden") persist();
+    const visibilityChanged = () => {
+      if (document.visibilityState === "hidden") {
+        wasPlayingBeforeHidden = !video.paused && !video.ended;
+        persist();
+        return;
+      }
+      // iOS suspends an installed PWA without unloading its React tree. Do
+      // not let the time spent suspended look like a media stall, and resume
+      // the existing element only when it was playing before suspension.
+      resetStallClock();
+      if (wasPlayingBeforeHidden && video.paused && !video.ended)
+        void play();
     };
     const time = () => {
       if (Math.abs(video.currentTime - lastMediaTime) >= 0.1) {
@@ -1334,6 +1345,12 @@ function VideoPlayer({
       lastAdvanceAt = Date.now();
       lastMediaTime = video.currentTime;
       if (!playbackStartedAt) playbackStartedAt = Date.now();
+      // Once the browser has emitted `play`, this source has successfully
+      // started. Do not tear it down for a short iOS/PWA startup stall and
+      // silently prepare another source; that creates the visible
+      // play → loading → play loop. Automatic source fallback remains
+      // available until the first play event.
+      playbackCommitted = true;
       intentionalSeekUntil = 0;
       stallRecoveries = 0;
       setPlaying(true);
@@ -1457,7 +1474,7 @@ function VideoPlayer({
     video.addEventListener("canplay", resetStallClock);
     video.addEventListener("canplay", playWhenReady);
     window.addEventListener("pagehide", persist);
-    document.addEventListener("visibilitychange", persistVisible);
+    document.addEventListener("visibilitychange", visibilityChanged);
     const stallTimer = window.setInterval(recoverStall, 3_000);
     const subtitleTrackTimer = window.setInterval(
       refreshEmbeddedSubtitles,
@@ -1592,7 +1609,7 @@ function VideoPlayer({
       video.removeEventListener("canplay", resetStallClock);
       video.removeEventListener("canplay", playWhenReady);
       window.removeEventListener("pagehide", persist);
-      document.removeEventListener("visibilitychange", persistVisible);
+      document.removeEventListener("visibilitychange", visibilityChanged);
       window.clearInterval(stallTimer);
       window.clearInterval(subtitleTrackTimer);
       hlsRef.current?.destroy();
