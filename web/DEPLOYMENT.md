@@ -1,27 +1,19 @@
-# Deploy Nuvio Enhanced Web
+# Deploy TikTakTV Web
 
 ## GitHub Pages
 
-The web build is entirely static. GitHub serves the app assets; video travels directly from your provider to your device. The app supports both repository subpaths and root/custom domains using relative assets and hash navigation.
+The source lives on the `enhanced` branch. GitHub Pages publishes the root of the `gh-pages` branch. The site uses relative asset paths so the same build can run on the GitHub Pages preview URL and the production domain.
 
-1. Create your GitHub fork of [Nuvio Mobile Enhanced](https://github.com/yesnt10/NuvioMobile-Enhanced/fork). Disable “Copy the enhanced branch only” if you want all upstream branches; only your web branch is needed for the website.
-2. Push this local `web-enhanced-pages` branch, including the web changes, to **your** fork. The local `origin` currently points at NuvioMedia upstream; do not push there. Add a new remote for your fork instead. Replace the placeholders below:
+From the project root, install locked dependencies, test, and build the static output:
 
-   ```sh
-   git add web .github/workflows/web-pages.yml README.md
-   git commit -m "Add Nuvio Enhanced web app and Pages deployment"
-   git remote add myfork https://github.com/YOUR_USERNAME/YOUR_FORK.git
-   git push -u myfork web-enhanced-pages
-   ```
+```sh
+cd web
+npm ci
+npm test
+VITE_SOURCE_URL=https://github.com/zachgus33/TikTakTV/tree/enhanced/web npm run build
+```
 
-3. In your fork, set `web-enhanced-pages` as the default branch (Settings → General → Default branch). This also makes the manual workflow dispatch easy to find.
-4. In **Settings → Pages → Build and deployment**, choose **GitHub Actions**. Enable Actions for the fork if GitHub prompts you. For this fork's inherited native workflows, keep release secrets unset and disable any you do not intend to run.
-5. In **Actions → Web app — test and deploy**, run the workflow on `web-enhanced-pages`. The workflow tests the app before publishing `web/dist`.
-6. Use the URL reported by the deployment. It is normally `https://YOUR_USERNAME.github.io/YOUR_FORK/`. Enter your IPTV login in Settings and test on your iPhone/iPad.
-
-If you choose another branch name, change the push branch in [web-pages.yml](../.github/workflows/web-pages.yml). The deployment job needs Pages enabled; it cannot create your GitHub fork or change account settings on its own.
-
-The workflow sets `VITE_SOURCE_URL` to your fork's web source so the deployed app links to its corresponding source. This is a public source-code URL, never an IPTV secret. For a manual deployment, set it before building.
+Publish the contents of `web/dist` to `gh-pages` and preserve the branch's `.nojekyll` and `CNAME` files. The original Tik-TakTV repository holds the source and operations documentation for the existing companion service. The website uses that service for encrypted friend codes and optional playback assistance.
 
 ## Custom domain
 
@@ -33,7 +25,7 @@ Use GitHub's custom-domain support rather than an iframe or masked URL forwardin
 4. After DNS validation and certificate issuance, enable **Enforce HTTPS**. DNS and certificates can take time even if buying the domain is immediate.
 5. Open the custom-domain address on the device and log in again. Browser storage is isolated by origin: your old github.io settings do not migrate automatically.
 
-For this Actions deployment, GitHub does not require a repository `CNAME` file. Domain settings live in Pages settings.
+GitHub Pages records the primary domain in the publishing branch's `CNAME` file.
 
 ### TikTak TV production records
 
