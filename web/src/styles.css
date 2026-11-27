@@ -8744,3 +8744,27 @@ button.primary:hover,
   opacity: 1;
   pointer-events: auto;
 }
+
+
+.friend-share-options {
+  min-width: 0;
+  border: 1px solid var(--line, #34343d);
+  border-radius: 12px;
+  margin: 0 0 16px;
+  padding: 8px 12px;
+}
+
+.friend-share-options fieldset {
+  min-width: 0;
+  border: 0;
+  margin: 4px 0 8px 20px;
+  padding: 0;
+}
+
+.friend-share-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  overflow-wrap: anywhere;
+}

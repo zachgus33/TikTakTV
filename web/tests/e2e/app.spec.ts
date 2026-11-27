@@ -6089,6 +6089,8 @@ test("a signed-in user can publish and revoke an isolated TorBox and Real-Debrid
   });
   await page.goto("/#settings");
   await page.getByRole("button", { name: /Playback/ }).click();
+  await page.getByRole("checkbox", { name: "TorBox access", exact: true }).check();
+  await page.getByRole("checkbox", { name: "Real-Debrid access", exact: true }).check();
   await page.getByLabel("Your private share code").fill("654321");
   await page.getByRole("button", { name: "Create code" }).click();
   await expect(page.getByText(/encrypted friend code is active/)).toBeVisible();
@@ -6120,6 +6122,68 @@ test("a signed-in user can publish and revoke an isolated TorBox and Real-Debrid
   await page.getByRole("button", { name: "Revoke my code" }).click();
   await expect(page.getByText(/friend code was revoked/)).toBeVisible();
   expect(revoked).toBe(2);
+});
+test("a selective friend code copies only the selected add-on", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("nuvio:playback-service", JSON.stringify({
+      url: "https://playback.example", token: "x".repeat(40),
+    }));
+    localStorage.setItem("nuvio:addons", JSON.stringify([
+      { base: "https://selected.example", manifest: { id: "selected", name: "Selected add-on", resources: [], catalogs: [], types: [] } },
+      { base: "https://private.example", manifest: { id: "private", name: "Private add-on", resources: [], catalogs: [], types: [] } },
+    ]));
+    localStorage.setItem("nuvio:collections", JSON.stringify([
+      { id: "private", title: "Private collection", folders: [] },
+    ]));
+  });
+  let payload: Record<string, unknown> = {};
+  await page.route("https://playback.example/friend/status", (route) =>
+    route.fulfill({ json: { available: true, published: false } }),
+  );
+  await page.route("https://playback.example/friend/setup", async (route) => {
+    payload = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("https://playback.example/friend/redeem", (route) =>
+    route.fulfill({ json: {
+      template: {
+        addons: [{ base: "https://shared.example", manifest: { id: "shared", name: "Shared add-on", resources: [], catalogs: [], types: [] } }],
+        collections: [],
+        homeCatalogs: [],
+        autoplay: false,
+        sourcePreferences: { friendSelectionV1: ["addons"] },
+      },
+    } }),
+  );
+  await page.goto("/#settings");
+  await page.getByRole("button", { name: /Playback/ }).click();
+  await page.getByRole("checkbox", { name: "Add-ons", exact: true }).check();
+  await page.getByRole("checkbox", { name: "Selected add-on", exact: true }).check();
+  await page.getByLabel("Your private share code").fill("654321");
+  await page.getByRole("button", { name: "Create code" }).click();
+  await expect(page.getByText(/encrypted friend code is active/)).toBeVisible();
+  expect(payload).toMatchObject({
+    torboxKey: "",
+    realDebridKey: "",
+    template: {
+      addons: [{ base: "https://selected.example" }],
+      collections: [],
+      homeCatalogs: [],
+      sourcePreferences: { friendSelectionV1: ["addons"] },
+    },
+  });
+  expect(JSON.stringify(payload)).not.toContain("private.example");
+  await page.getByLabel("Friend code").fill("123456");
+  await page.getByRole("button", { name: "Install setup" }).click();
+  await expect(page.getByText(/Friend setup installed/)).toBeVisible();
+  const stored = await page.evaluate(() => ({
+    addons: JSON.parse(localStorage.getItem("nuvio:addons") || "[]"),
+    collections: JSON.parse(localStorage.getItem("nuvio:collections") || "[]"),
+  }));
+  expect(stored.addons.map((addon: { base: string }) => addon.base)).toEqual([
+    "https://selected.example", "https://private.example", "https://shared.example",
+  ]);
+  expect(stored.collections[0].title).toBe("Private collection");
 });
 test("manual raw torrent is resolved cached-only without autoplaying it", async ({
   page,

@@ -681,7 +681,7 @@ export default function Settings(props: Props) {
                   Sharing add-ons can expose tokens in their manifest URLs. Sharing an IPTV connection includes its credentials.
                   A new code replaces your previous code.
                 </p>
-                <fieldset>
+                <fieldset className="friend-share-options">
                   <legend>Include in your code</legend>
                   {(Object.keys(friendOptions) as FriendOption[]).map((option) => {
                     const disabled =
@@ -764,7 +764,12 @@ export default function Settings(props: Props) {
                           homeCatalogs: selected.includes("homeCatalogs") ? original.homeCatalogs : [],
                           autoplay: settings && original.autoplay,
                           sourcePreferences: {
-                            ...(settings ? original.sourcePreferences : {}),
+                            ...(settings && original.sourcePreferences ? {
+                              ...original.sourcePreferences,
+                              autoPlaySelectedAddons: original.sourcePreferences.autoPlaySelectedAddons.filter(
+                                (base) => selected.includes("addons") && addons.some((addon) => addon.base === base),
+                              ),
+                            } : {}),
                             friendSelectionV1: selected,
                           },
                           nuvioWebSettings: settings ? original.nuvioWebSettings : undefined,

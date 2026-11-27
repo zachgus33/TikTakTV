@@ -5993,24 +5993,26 @@ export default function App() {
                     const includes = (part: NonNullable<typeof selection>[number]) =>
                       selection === undefined || (Array.isArray(selection) && selection.includes(part));
                     if (includes("addons")) {
-                      const incoming = new Map(template.addons.map((addon) => [addon.base, addon]));
-                      setAddons(selection === undefined ? template.addons : [
-                        ...addons.filter((addon) => !incoming.has(addon.base)),
-                        ...incoming.values(),
-                      ]);
+                      setAddons((current) => {
+                        if (selection === undefined) return template.addons;
+                        const merged = new Map(current.map((item) => [item.base, item]));
+                        for (const item of template.addons) merged.set(item.base, item);
+                        return [...merged.values()];
+                      });
                     }
                     if (includes("collections")) {
-                      const incoming = new Map(template.collections.map((collection) => [collection.id, collection]));
-                      setCollections(selection === undefined ? template.collections : [
-                        ...collections.filter((collection) => !incoming.has(collection.id)),
-                        ...incoming.values(),
-                      ]);
+                      setCollections((current) => {
+                        if (selection === undefined) return template.collections;
+                        const merged = new Map(current.map((item) => [item.id, item]));
+                        for (const item of template.collections) merged.set(item.id, item);
+                        return [...merged.values()];
+                      });
                     }
                     if (includes("homeCatalogs")) setHomeCatalogs(template.homeCatalogs);
                     if (includes("settings")) {
                       setAutoplay(template.autoplay);
                       if (template.sourcePreferences) {
-                        const saved = saveStreamPreferences({ ...sourcePreferences, ...sharedPreferences });
+                        const saved = saveStreamPreferences(sharedPreferences as StreamPreferences);
                         setSourcePreferences(saved);
                         setAutoplay(saved.autoPlayMode !== "manual");
                       }
