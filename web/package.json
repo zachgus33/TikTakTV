@@ -9,7 +9,10 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "browsers:install": "playwright install chromium firefox webkit",
+    "test:e2e:ios": "playwright test --project=iphone --project=ipad",
+    "test:e2e:desktop": "playwright test --project=desktop --project=firefox"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",

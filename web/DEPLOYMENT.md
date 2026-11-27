@@ -9,9 +9,21 @@ From the project root, install locked dependencies, test, and build the static o
 ```sh
 cd web
 npm ci
+npm run browsers:install
 npm test
 VITE_SOURCE_URL=https://github.com/zachgus33/TikTakTV/tree/enhanced/web npm run build
 ```
+
+The browser install provisions Chromium, Firefox, and WebKit for automated checks. Playwright's `iphone` and `ipad` projects use WebKit because every iOS browser, including Chrome and Firefox, uses Apple's WebKit engine. Visitors do not install these packages. They open TikTakTV in Safari, Chrome, Firefox, or another iOS browser and receive the same web app.
+
+Run the device checks with:
+
+```sh
+npm run test:e2e:ios
+npm run test:e2e:desktop
+```
+
+On Debian or Ubuntu, Playwright can install missing native browser libraries with `npx playwright install-deps`. The checked-in GitHub Actions workflow runs in the Playwright container, which includes those libraries. On Arch-based systems, install the distribution's WebKitGTK, ICU, multimedia, graphics, font, and accessibility packages through the system package manager before running the iOS projects.
 
 Publish the contents of `web/dist` to `gh-pages` and preserve the branch's `.nojekyll` and `CNAME` files. The original Tik-TakTV repository holds the source and operations documentation for the existing companion service. The website uses that service for encrypted friend codes and optional playback assistance.
 
