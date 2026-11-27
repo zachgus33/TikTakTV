@@ -4967,6 +4967,53 @@ test("subtitle auto mode respects Off and forced-subtitle preferences", async ({
     timeout: 6_000,
   });
 });
+
+test("phone and tablet title cards form a swipeable carousel", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !["iphone", "ipad"].includes(testInfo.project.name),
+    "The device projects cover touch carousel behavior.",
+  );
+  const metas = Array.from({ length: 8 }, (_, index) => ({
+    ...meta,
+    id: `tt-carousel-${index}`,
+    name: `Carousel title ${index + 1}`,
+  }));
+  await page.route("https://v3-cinemeta.strem.io/**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    return route.fulfill({
+      json: path.includes("/meta/") ? { meta: metas[0] } : { metas },
+    });
+  });
+  await page.goto("/#discover");
+  await expect(page.locator(".media-grid")).toBeVisible();
+  const layout = await page.locator(".media-grid").evaluate((grid) => {
+    const cards = [...grid.querySelectorAll<HTMLElement>(".media-card")];
+    return {
+      display: getComputedStyle(grid).display,
+      overflowX: getComputedStyle(grid).overflowX,
+      scrollWidth: grid.scrollWidth,
+      clientWidth: grid.clientWidth,
+      cardRects: cards.slice(0, 3).map((card) => {
+        const rect = card.getBoundingClientRect();
+        return { left: rect.left, width: rect.width };
+      }),
+      titleOverflow: cards
+        .map((card) => card.querySelector<HTMLElement>("strong"))
+        .filter((title): title is HTMLElement => Boolean(title))
+        .filter((title) => title.scrollHeight > title.clientHeight + 1).length,
+    };
+  });
+  expect(layout.display).toBe("flex");
+  expect(layout.overflowX).toBe("auto");
+  expect(layout.scrollWidth).toBeGreaterThan(layout.clientWidth);
+  expect(layout.titleOverflow).toBe(0);
+  expect(layout.cardRects.length).toBe(3);
+  expect(layout.cardRects.every((card) => card.width > 0)).toBe(true);
+  expect(layout.cardRects[1].left).toBeGreaterThan(layout.cardRects[0].left);
+  expect(layout.cardRects[2].left).toBeGreaterThan(layout.cardRects[1].left);
+});
 test("autoplay skips resolved HEVC and MKV files when a browser-ready MP4 exists", async ({
   page,
 }) => {
@@ -5636,6 +5683,32 @@ test("Home motion preview loads muted and enables sound after a click", async ({
   await expect(preview).toHaveAttribute("src", /preview123.*mute=1/, {
     timeout: 10_000,
   });
+  const previewLayout = await page.locator(".hero").evaluate((hero) => {
+    const layer = hero.querySelector<HTMLElement>(".hero-preview-layer")!;
+    const frame = hero.querySelector<HTMLIFrameElement>(".hero-motion-preview")!;
+    const artwork = hero.querySelector<HTMLElement>(".hero-image")!;
+    const heroBox = hero.getBoundingClientRect();
+    const layerBox = layer.getBoundingClientRect();
+    const frameBox = frame.getBoundingClientRect();
+    const artworkStyle = getComputedStyle(artwork);
+    return {
+      hero: { width: heroBox.width, height: heroBox.height },
+      layer: { width: layerBox.width, height: layerBox.height },
+      frame: { width: frameBox.width, height: frameBox.height },
+      artworkVisibility: artworkStyle.visibility,
+      artworkOpacity: artworkStyle.opacity,
+    };
+  });
+  expect(previewLayout.layer.width).toBeCloseTo(previewLayout.hero.width, 0);
+  expect(previewLayout.layer.height).toBeCloseTo(previewLayout.hero.height, 0);
+  expect(previewLayout.frame.width).toBeGreaterThanOrEqual(
+    previewLayout.hero.width,
+  );
+  expect(previewLayout.frame.height).toBeGreaterThanOrEqual(
+    previewLayout.hero.height,
+  );
+  expect(previewLayout.artworkVisibility).toBe("hidden");
+  expect(previewLayout.artworkOpacity).toBe("0");
   await page.getByRole("button", { name: "Preview sound" }).click();
   await expect(preview).toHaveAttribute("src", /preview123.*mute=0/);
   await page.getByRole("button", { name: "Explore title" }).click();

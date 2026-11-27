@@ -1502,6 +1502,35 @@ body:not(.show-kofi-widget) .floating-chat-kofi-popup-iframe-mobi,
     linear-gradient(90deg, #0d0d0ff7 0%, #0d0d0fc9 30%, #0d0d0f20 80%),
     linear-gradient(0deg, #0d0d0f 0%, transparent 45%, #0d0d0f22 100%);
 }
+.hero-preview-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  background: #000;
+}
+.hero-motion-preview {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--hero-preview-width, 100%);
+  height: var(--hero-preview-height, 100%);
+  transform: translate(-50%, -50%);
+  border: 0;
+  pointer-events: none;
+}
+.hero-preview-layer::after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(90deg, #0d0d0f70 0%, transparent 52%, #0d0d0f35 100%);
+  content: "";
+  pointer-events: none;
+}
+.hero-preview-active .hero-image {
+  visibility: hidden;
+  opacity: 0;
+}
 .hero-content {
   position: relative;
   padding: 76px 48px 40px;
@@ -4404,11 +4433,33 @@ body:has(dialog[open]:not(.mini-live-player)) {
     min-height: 38px;
   }
   .media-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 21px 11px;
+    display: flex;
+    gap: 14px;
+    margin-right: -20px;
+    padding: 0 20px 16px 1px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    touch-action: pan-x;
+  }
+  .media-grid::-webkit-scrollbar {
+    display: none;
+  }
+  .media-grid .media-card {
+    flex: 0 0 min(43vw, 176px);
+    width: min(43vw, 176px);
+    max-width: min(43vw, 176px);
+    scroll-snap-align: start;
   }
   .media-grid .media-card strong {
     font-size: 10px;
+    min-height: 2.7em;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
   }
   .media-grid .rating {
     font-size: 8px;
@@ -4606,6 +4657,37 @@ body:has(dialog[open]:not(.mini-live-player)) {
   }
   .empty h2 {
     font-size: 21px;
+  }
+}
+
+@media (min-width: 601px) and (max-width: 1100px) and (pointer: coarse) {
+  .media-grid {
+    display: flex;
+    gap: 18px;
+    margin-right: -26px;
+    padding: 0 26px 18px 1px;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+    touch-action: pan-x;
+  }
+  .media-grid::-webkit-scrollbar {
+    display: none;
+  }
+  .media-grid .media-card {
+    flex: 0 0 clamp(190px, 28vw, 240px);
+    width: clamp(190px, 28vw, 240px);
+    max-width: clamp(190px, 28vw, 240px);
+    scroll-snap-align: start;
+  }
+  .media-grid .media-card strong {
+    min-height: 2.7em;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
   }
 }
 @media (max-width: 360px) {

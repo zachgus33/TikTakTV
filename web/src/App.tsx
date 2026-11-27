@@ -3408,6 +3408,7 @@ export default function App() {
     videoId: string;
   } | null>(null);
   const [heroPreviewSound, setHeroPreviewSound] = useState(false);
+  const heroPreviewLayerRef = useRef<HTMLDivElement>(null);
   const [homeCatalogs, setHomeCatalogs] = useStored<HomeCatalogSetting[]>(
     "home-catalogs",
     [],
@@ -4216,6 +4217,23 @@ export default function App() {
     nuvioWebSettings.motionPreviews,
   ]);
   useEffect(() => {
+    const layer = heroPreviewLayerRef.current;
+    if (!layer || !heroPreview) return;
+
+    const updateFrameSize = () => {
+      const { width, height } = layer.getBoundingClientRect();
+      const frameWidth = Math.max(width, height * (16 / 9));
+      const frameHeight = Math.max(height, width * (9 / 16));
+      layer.style.setProperty("--hero-preview-width", `${frameWidth}px`);
+      layer.style.setProperty("--hero-preview-height", `${frameHeight}px`);
+    };
+
+    updateFrameSize();
+    const observer = new ResizeObserver(updateFrameSize);
+    observer.observe(layer);
+    return () => observer.disconnect();
+  }, [heroPreview]);
+  useEffect(() => {
     if (
       page !== "home" ||
       !nuvioWebSettings.heroAutoScroll ||
@@ -4719,7 +4737,13 @@ export default function App() {
               {!collectionBrowsing &&
                 nuvioWebSettings.homeHeroEnabled &&
                 (hero ? (
-                  <section className="hero">
+                  <section
+                    className={`hero${
+                      heroPreview?.key === itemKey(hero)
+                        ? " hero-preview-active"
+                        : ""
+                    }`}
+                  >
                     <div
                       className={`hero-image hero-image-${nuvioWebSettings.heroArtwork}`}
                     >
@@ -4729,7 +4753,13 @@ export default function App() {
                         wide={nuvioWebSettings.heroArtwork === "backdrop"}
                         priority
                       />
-                      {heroPreview?.key === itemKey(hero) && (
+                    </div>
+                    {heroPreview?.key === itemKey(hero) && (
+                      <div
+                        ref={heroPreviewLayerRef}
+                        className="hero-preview-layer"
+                        aria-label={`${hero.name} trailer preview`}
+                      >
                         <iframe
                           key={`${heroPreview.videoId}:${heroPreviewSound}`}
                           className="hero-motion-preview"
@@ -4739,8 +4769,8 @@ export default function App() {
                           referrerPolicy="strict-origin-when-cross-origin"
                           tabIndex={-1}
                         />
-                      )}
-                    </div>
+                      </div>
+                    )}
                     <div className="hero-content">
                       <span className="hero-tag">
                         <Sparkles size={14} /> YOUR NEXT GREAT WATCH
